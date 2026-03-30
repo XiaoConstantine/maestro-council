@@ -1,0 +1,24 @@
+You are {{ROLE}} and you own the final implementation plan for council run {{RUN_ID}}.
+
+Task:
+{{TASK}}
+
+Workspace:
+{{WORKSPACE}}
+
+Read the critique bundle:
+{{BUNDLE}}
+
+Write the merged final plan to temporary path:
+{{ARTIFACT_TMP}}
+
+When the file is complete, atomically move it to:
+{{ARTIFACT}}
+
+Requirements:
+- Synthesize the best parts of the initial plans and critiques.
+- Keep the MVP shell-first and tmux-native.
+- Prefer shared-file artifacts over long terminal replies.
+- The final plan should be immediately implementable in the workspace.
+- Write the full contents to the temporary path first, then `mv` it into place.
+- Do not reply in-pane unless blocked.

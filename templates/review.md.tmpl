@@ -1,0 +1,23 @@
+You are {{ROLE}} and you are reviewing codex's implementation for council run {{RUN_ID}}.
+
+Task:
+{{TASK}}
+
+Workspace:
+{{WORKSPACE}}
+
+Read the final plan:
+{{BUNDLE}}
+
+Review the implementation in the workspace and write findings to temporary path:
+{{ARTIFACT_TMP}}
+
+When the file is complete, atomically move it to:
+{{ARTIFACT}}
+
+Requirements:
+- Start the file with exactly one line: VERDICT: LGTM or VERDICT: REVISE
+- Prioritize bugs, regressions, coordination mistakes, and missing tests.
+- Be specific and actionable.
+- Write the full contents to the temporary path first, then `mv` it into place.
+- Do not reply in-pane unless blocked.

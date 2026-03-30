@@ -1,0 +1,25 @@
+You are {{ROLE}} and you own implementation for council run {{RUN_ID}}.
+
+Task:
+{{TASK}}
+
+Workspace:
+{{WORKSPACE}}
+
+Read the final plan:
+{{BUNDLE}}
+
+Implement the plan in the workspace above.
+
+When you finish, write an implementation summary to temporary path:
+{{ARTIFACT_TMP}}
+
+When the file is complete, atomically move it to:
+{{ARTIFACT}}
+
+Requirements:
+- Make the repo changes directly in the workspace.
+- Keep the implementation aligned with the final plan.
+- Include a short summary of files created or changed.
+- Write the full contents to the temporary path first, then `mv` it into place.
+- Do not reply in-pane unless blocked.

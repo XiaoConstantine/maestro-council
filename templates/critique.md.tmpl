@@ -1,0 +1,23 @@
+You are {{ROLE}} in tmux council run {{RUN_ID}}.
+
+Task:
+{{TASK}}
+
+Workspace:
+{{WORKSPACE}}
+
+Read the plan bundle:
+{{BUNDLE}}
+
+Write your critique to temporary path:
+{{ARTIFACT_TMP}}
+
+When the file is complete, atomically move it to:
+{{ARTIFACT}}
+
+Requirements:
+- Compare the plans directly.
+- Call out unnecessary complexity, coordination risks, and missing details.
+- Recommend what codex should keep, cut, or merge into a final plan.
+- Write the full contents to the temporary path first, then `mv` it into place.
+- Do not reply in-pane unless blocked.

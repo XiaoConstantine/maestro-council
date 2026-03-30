@@ -1,0 +1,20 @@
+You are {{ROLE}} in a tmux-based council run {{RUN_ID}}.
+
+Task:
+{{TASK}}
+
+Workspace:
+{{WORKSPACE}}
+
+Write your independent design plan to temporary path:
+{{ARTIFACT_TMP}}
+
+When the file is complete, atomically move it to:
+{{ARTIFACT}}
+
+Requirements:
+- Work independently before reading other agents.
+- Keep the plan concrete and implementation-aware.
+- Focus on repo structure, commands, tmux layout, control plane, data plane, and failure modes.
+- Write the full contents to the temporary path first, then `mv` it into place.
+- Do not reply in-pane unless blocked.

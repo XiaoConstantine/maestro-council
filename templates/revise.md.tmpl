@@ -1,0 +1,25 @@
+You are {{ROLE}} and you are revising the implementation for council run {{RUN_ID}}.
+
+Task:
+{{TASK}}
+
+Workspace:
+{{WORKSPACE}}
+
+Read the review bundle:
+{{BUNDLE}}
+
+Apply the feedback in the workspace above.
+
+When you finish, write a revision summary to temporary path:
+{{ARTIFACT_TMP}}
+
+When the file is complete, atomically move it to:
+{{ARTIFACT}}
+
+Requirements:
+- Address the review findings directly in the workspace.
+- If you disagree with a finding, explain that briefly in the revision summary.
+- Include a short list of files changed.
+- Write the full contents to the temporary path first, then `mv` it into place.
+- Do not reply in-pane unless blocked.

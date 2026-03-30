@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+
+if [[ -f "${REPO_ROOT}/council.conf" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/council.conf"
+fi
+
+WINDOW_NAME="${MAESTRO_COUNCIL_WINDOW:-maestro-council}"
+CODEX_LABEL="${MAESTRO_COUNCIL_CODEX_LABEL:-council-codex}"
+CC_LABEL="${MAESTRO_COUNCIL_CC_LABEL:-council-cc}"
+AMP_LABEL="${MAESTRO_COUNCIL_AMP_LABEL:-council-amp}"
+
+CODEX_CMD="${MAESTRO_COUNCIL_CODEX_CMD:-codex}"
+CC_CMD="${MAESTRO_COUNCIL_CC_CMD:-claude}"
+AMP_CMD="${MAESTRO_COUNCIL_AMP_CMD:-amp}"
+
+COUNCIL_HOME="${MAESTRO_COUNCIL_HOME:-${REPO_ROOT}/council-out}"
+RUNS_DIR="${COUNCIL_HOME}/runs"
+TMP_DIR="${COUNCIL_HOME}/tmp"
+DEFAULT_TIMEOUT="${MAESTRO_COUNCIL_TIMEOUT:-900}"
+POLL_INTERVAL="${MAESTRO_COUNCIL_POLL_INTERVAL:-5}"
+MAX_REVIEW_ROUNDS="${MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS:-2}"
+
+CURRENT_RUN_DIR=""
+CURRENT_RUN_ID=""
+CURRENT_MEMBER_LABELS=""
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+need_bin() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+require_tmux() {
+  [[ -n "${TMUX:-}" ]] || die "run this inside tmux"
+  need_bin tmux
+  need_bin tmux-bridge
+  need_bin perl
+}
+
+ensure_dirs() {
+  mkdir -p "${RUNS_DIR}" "${TMP_DIR}"
+}
+
+current_session_target() {
+  tmux display-message -p '#{session_id}'
+}
+
+current_session_name() {
+  tmux display-message -p '#S'
+}
+
+current_path() {
+  tmux display-message -p '#{pane_current_path}'
+}
+
+window_target() {
+  local session
+  session=$(current_session_target)
+  echo "${session}:${WINDOW_NAME}"
+}
+
+window_display_target() {
+  local session_name
+  session_name=$(current_session_name)
+  echo "${session_name}:${WINDOW_NAME}"
+}
+
+window_exists() {
+  tmux list-windows -t "$(current_session_target)" -F '#W' | grep -Fx "${WINDOW_NAME}" >/dev/null 2>&1
+}
+
+council_workspace() {
+  tmux show-options -w -v -t "$(window_target)" @maestro_council_workspace 2>/dev/null || true
+}
+
+council_labels_ready() {
+  local target
+  target=$(window_target)
+  [[ "$(tmux list-panes -t "${target}" -F '#{pane_id}' | wc -l | tr -d ' ')" -eq 3 ]] \
+    && tmux list-panes -t "${target}" -F '#{@name}' | grep -Fx "${CODEX_LABEL}" >/dev/null 2>&1 \
+    && tmux list-panes -t "${target}" -F '#{@name}' | grep -Fx "${CC_LABEL}" >/dev/null 2>&1 \
+    && tmux list-panes -t "${target}" -F '#{@name}' | grep -Fx "${AMP_LABEL}" >/dev/null 2>&1
+}
+
+send_instruction() {
+  local target="$1"
+  local instruction="$2"
+  local message="Council task ready. Read and execute: ${instruction}"
+  tmux-bridge read "${target}" 10 >/dev/null
+  tmux-bridge message "${target}" "${message}" >/dev/null
+  tmux-bridge read "${target}" 10 >/dev/null
+  tmux-bridge keys "${target}" Enter >/dev/null
+}
+
+safe_notice() {
+  local target="$1"
+  local message="$2"
+  tmux-bridge read "${target}" 10 >/dev/null 2>&1 || return 0
+  tmux-bridge message "${target}" "${message}" >/dev/null 2>&1 || return 0
+  tmux-bridge read "${target}" 10 >/dev/null 2>&1 || return 0
+  tmux-bridge keys "${target}" Enter >/dev/null 2>&1 || return 0
+}
+
+wait_for_file() {
+  local path="$1"
+  local timeout="${2:-${DEFAULT_TIMEOUT}}"
+  local waited=0
+
+  while [[ ! -s "${path}" ]]; do
+    if (( waited >= timeout )); then
+      die "timed out waiting for ${path}"
+    fi
+    sleep "${POLL_INTERVAL}"
+    waited=$((waited + POLL_INTERVAL))
+  done
+}
+
+render_template() {
+  local template="$1"
+  local output="$2"
+  local run_id="$3"
+  local workspace="$4"
+  local task="$5"
+  local artifact="$6"
+  local bundle="${7:-}"
+  local role="${8:-}"
+  local artifact_tmp="${artifact}.tmp"
+
+  MC_RUN_ID="${run_id}" \
+  MC_WORKSPACE="${workspace}" \
+  MC_TASK="${task}" \
+  MC_ARTIFACT="${artifact}" \
+  MC_ARTIFACT_TMP="${artifact_tmp}" \
+  MC_BUNDLE="${bundle}" \
+  MC_ROLE="${role}" \
+  perl -0pe '
+    s/\{\{RUN_ID\}\}/$ENV{MC_RUN_ID}/g;
+    s/\{\{WORKSPACE\}\}/$ENV{MC_WORKSPACE}/g;
+    s/\{\{TASK\}\}/$ENV{MC_TASK}/g;
+    s/\{\{ARTIFACT\}\}/$ENV{MC_ARTIFACT}/g;
+    s/\{\{ARTIFACT_TMP\}\}/$ENV{MC_ARTIFACT_TMP}/g;
+    s/\{\{BUNDLE\}\}/$ENV{MC_BUNDLE}/g;
+    s/\{\{ROLE\}\}/$ENV{MC_ROLE}/g;
+  ' "${template}" > "${output}"
+}
+
+review_verdict() {
+  local file="$1"
+  awk '
+    BEGIN { IGNORECASE = 1 }
+    /^VERDICT:/ {
+      print toupper($2)
+      exit
+    }
+  ' "${file}"
+}
+
+write_bundle() {
+  local output="$1"
+  local title="$2"
+  local task="$3"
+  shift 3
+
+  {
+    printf '# %s\n\n' "${title}"
+    printf 'Task: %s\n' "${task}"
+    while [[ $# -gt 1 ]]; do
+      local name="$1"
+      local path="$2"
+      shift 2
+      printf '\n## %s\n' "${name}"
+      cat "${path}"
+      printf '\n'
+    done
+  } > "${output}"
+}
+
+agent_runner_script() {
+  cat <<'EOF'
+eval "$MAESTRO_COUNCIL_AGENT_CMD"
+status=$?
+printf '\n[maestro-council] agent exited with code %s. Dropping to shell.\n' "$status"
+exec "$MAESTRO_COUNCIL_AGENT_SHELL" -i
+EOF
+}
+
+launch_agent_window() {
+  local target_session="$1"
+  local window_name="$2"
+  local cwd="$3"
+  local cmd="$4"
+  local shell_bin="${SHELL:-/bin/zsh}"
+
+  tmux new-window -t "${target_session}" -n "${window_name}" -c "${cwd}" \
+    env MAESTRO_COUNCIL_AGENT_CMD="${cmd}" MAESTRO_COUNCIL_AGENT_SHELL="${shell_bin}" \
+    "${shell_bin}" -lc "$(agent_runner_script)"
+}
+
+split_agent_pane() {
+  local target="$1"
+  local direction="$2"
+  local cwd="$3"
+  local cmd="$4"
+  local shell_bin="${SHELL:-/bin/zsh}"
+
+  tmux split-window "${direction}" -t "${target}" -c "${cwd}" \
+    env MAESTRO_COUNCIL_AGENT_CMD="${cmd}" MAESTRO_COUNCIL_AGENT_SHELL="${shell_bin}" \
+    "${shell_bin}" -lc "$(agent_runner_script)"
+}
+
+ensure_council_ready() {
+  if ! window_exists || ! council_labels_ready; then
+    start_council >/dev/null
+  fi
+
+  if ! window_exists || ! council_labels_ready; then
+    die "council window is not healthy. Run 'council start' and confirm the codex/cc/amp panes are up."
+  fi
+}
+
+cleanup_run() {
+  local exit_code="$1"
+
+  if [[ -n "${CURRENT_RUN_DIR}" ]]; then
+    if (( exit_code == 0 )); then
+      printf 'SUCCESS\n' > "${CURRENT_RUN_DIR}/status.txt"
+    else
+      printf 'FAILED\n' > "${CURRENT_RUN_DIR}/status.txt"
+    fi
+  fi
+
+  if (( exit_code != 0 )) && [[ -n "${CURRENT_RUN_ID}" && -n "${CURRENT_MEMBER_LABELS}" ]]; then
+    local label
+    for label in ${CURRENT_MEMBER_LABELS}; do
+      safe_notice "${label}" "Council run ${CURRENT_RUN_ID} was cancelled or failed. Ignore its previous instructions if you are still working on them."
+    done
+  fi
+}
+
+start_council() {
+  require_tmux
+  ensure_dirs
+
+  local session_target cwd target display_target
+  session_target=$(current_session_target)
+  cwd=$(current_path)
+  target=$(window_target)
+  display_target=$(window_display_target)
+
+  if window_exists; then
+    local existing_workspace
+    existing_workspace=$(council_workspace)
+
+    if council_labels_ready && [[ "${existing_workspace}" == "${cwd}" ]]; then
+      tmux select-window -t "${target}"
+      echo "selected existing council window: ${display_target}"
+      return
+    fi
+
+    if [[ -n "${existing_workspace}" && "${existing_workspace}" != "${cwd}" ]]; then
+      echo "recreating council window for workspace change: ${existing_workspace} -> ${cwd}" >&2
+    else
+      echo "recreating invalid council window: ${display_target}" >&2
+    fi
+    tmux kill-window -t "${target}"
+  fi
+
+  launch_agent_window "${session_target}" "${WINDOW_NAME}" "${cwd}" "${CODEX_CMD}"
+  split_agent_pane "${target}" -h "${cwd}" "${CC_CMD}"
+  split_agent_pane "${target}" -v "${cwd}" "${AMP_CMD}"
+  tmux select-layout -t "${target}" tiled
+
+  local panes=()
+  local pane_id
+  while IFS= read -r pane_id; do
+    panes+=("${pane_id}")
+  done < <(tmux list-panes -t "${target}" -F '#{pane_id}')
+  [[ "${#panes[@]}" -eq 3 ]] || die "expected 3 panes, got ${#panes[@]}"
+
+  tmux-bridge name "${panes[0]}" "${CODEX_LABEL}"
+  tmux-bridge name "${panes[1]}" "${CC_LABEL}"
+  tmux-bridge name "${panes[2]}" "${AMP_LABEL}"
+  tmux set-option -w -t "${target}" @maestro_council_workspace "${cwd}"
+
+  tmux select-window -t "${target}"
+  tmux select-pane -t "${panes[0]}"
+
+  cat <<EOF
+council started in ${display_target}
+codex:   ${CODEX_LABEL}
+cc:      ${CC_LABEL}
+amp:     ${AMP_LABEL}
+workspace: ${cwd}
+EOF
+}
+
+status_council() {
+  require_tmux
+  tmux-bridge list | grep -E "(${CODEX_LABEL}|${CC_LABEL}|${AMP_LABEL}|${WINDOW_NAME})" || true
+}
+
+run_council() {
+  require_tmux
+  ensure_dirs
+  [[ $# -gt 0 ]] || die "usage: council run <task>"
+  ensure_council_ready
+
+  local task workspace run_id run_dir plan_dir critique_dir review_dir impl_dir instruction_dir bundle_dir
+  task="$*"
+  workspace=$(council_workspace)
+  [[ -n "${workspace}" ]] || die "council workspace is not set. Run 'council start' from the target workspace first."
+  run_id=$(date +%Y%m%d-%H%M%S)-$$
+  run_dir="${RUNS_DIR}/${run_id}"
+  plan_dir="${run_dir}/plans"
+  critique_dir="${run_dir}/critiques"
+  review_dir="${run_dir}/reviews"
+  impl_dir="${run_dir}/implementation"
+  instruction_dir="${run_dir}/instructions"
+  bundle_dir="${run_dir}/bundles"
+
+  mkdir -p "${plan_dir}" "${critique_dir}" "${review_dir}" "${impl_dir}" "${instruction_dir}" "${bundle_dir}"
+  printf "%s\n" "${task}" > "${run_dir}/task.txt"
+  printf "%s\n" "${workspace}" > "${run_dir}/workspace.txt"
+
+  CURRENT_RUN_DIR="${run_dir}"
+  CURRENT_RUN_ID="${run_id}"
+  CURRENT_MEMBER_LABELS="${CODEX_LABEL} ${CC_LABEL} ${AMP_LABEL}"
+  trap 'cleanup_run $?' EXIT
+
+  local members=("codex:${CODEX_LABEL}" "cc:${CC_LABEL}" "amp:${AMP_LABEL}")
+  local member role label instruction artifact
+
+  for member in "${members[@]}"; do
+    role=${member%%:*}
+    label=${member##*:}
+    artifact="${plan_dir}/${role}.md"
+    instruction="${instruction_dir}/plan-${role}.md"
+    render_template "${REPO_ROOT}/templates/plan.md.tmpl" "${instruction}" "${run_id}" "${workspace}" "${task}" "${artifact}" "" "${role}"
+    send_instruction "${label}" "${instruction}"
+  done
+
+  for member in codex cc amp; do
+    wait_for_file "${plan_dir}/${member}.md"
+  done
+
+  write_bundle \
+    "${bundle_dir}/plans.md" \
+    "Council Plans" \
+    "${task}" \
+    "codex" "${plan_dir}/codex.md" \
+    "cc" "${plan_dir}/cc.md" \
+    "amp" "${plan_dir}/amp.md"
+
+  for member in "${members[@]}"; do
+    role=${member%%:*}
+    label=${member##*:}
+    artifact="${critique_dir}/${role}.md"
+    instruction="${instruction_dir}/critique-${role}.md"
+    render_template "${REPO_ROOT}/templates/critique.md.tmpl" "${instruction}" "${run_id}" "${workspace}" "${task}" "${artifact}" "${bundle_dir}/plans.md" "${role}"
+    send_instruction "${label}" "${instruction}"
+  done
+
+  for member in codex cc amp; do
+    wait_for_file "${critique_dir}/${member}.md"
+  done
+
+  write_bundle \
+    "${bundle_dir}/critiques.md" \
+    "Council Critiques" \
+    "${task}" \
+    "codex" "${critique_dir}/codex.md" \
+    "cc" "${critique_dir}/cc.md" \
+    "amp" "${critique_dir}/amp.md"
+
+  render_template "${REPO_ROOT}/templates/final-plan.md.tmpl" \
+    "${instruction_dir}/final-plan-codex.md" \
+    "${run_id}" "${workspace}" "${task}" "${run_dir}/plan.final.md" "${bundle_dir}/critiques.md" "codex"
+  send_instruction "${CODEX_LABEL}" "${instruction_dir}/final-plan-codex.md"
+  wait_for_file "${run_dir}/plan.final.md"
+
+  render_template "${REPO_ROOT}/templates/implement.md.tmpl" \
+    "${instruction_dir}/implement-codex.md" \
+    "${run_id}" "${workspace}" "${task}" "${impl_dir}/codex.md" "${run_dir}/plan.final.md" "codex"
+  send_instruction "${CODEX_LABEL}" "${instruction_dir}/implement-codex.md"
+  wait_for_file "${impl_dir}/codex.md"
+
+  local review_round=1
+  local cc_verdict=""
+  local amp_verdict=""
+  local cc_review_path=""
+  local amp_review_path=""
+
+  while (( review_round <= MAX_REVIEW_ROUNDS )); do
+    for member in "cc:${CC_LABEL}" "amp:${AMP_LABEL}"; do
+      role=${member%%:*}
+      label=${member##*:}
+      artifact="${review_dir}/${role}.round-${review_round}.md"
+      instruction="${instruction_dir}/review-${role}.round-${review_round}.md"
+      render_template "${REPO_ROOT}/templates/review.md.tmpl" "${instruction}" "${run_id}" "${workspace}" "${task}" "${artifact}" "${run_dir}/plan.final.md" "${role}"
+      send_instruction "${label}" "${instruction}"
+    done
+
+    cc_review_path="${review_dir}/cc.round-${review_round}.md"
+    amp_review_path="${review_dir}/amp.round-${review_round}.md"
+    wait_for_file "${cc_review_path}"
+    wait_for_file "${amp_review_path}"
+
+    cc_verdict=$(review_verdict "${cc_review_path}")
+    amp_verdict=$(review_verdict "${amp_review_path}")
+
+    if [[ "${cc_verdict}" == "LGTM" && "${amp_verdict}" == "LGTM" ]]; then
+      break
+    fi
+
+    if (( review_round >= MAX_REVIEW_ROUNDS )); then
+      break
+    fi
+
+    write_bundle \
+      "${bundle_dir}/reviews.round-${review_round}.md" \
+      "Council Reviews Round ${review_round}" \
+      "${task}" \
+      "cc" "${cc_review_path}" \
+      "amp" "${amp_review_path}"
+
+    render_template "${REPO_ROOT}/templates/revise.md.tmpl" \
+      "${instruction_dir}/revise-codex.round-${review_round}.md" \
+      "${run_id}" "${workspace}" "${task}" "${impl_dir}/codex.revise-round-${review_round}.md" "${bundle_dir}/reviews.round-${review_round}.md" "codex"
+    send_instruction "${CODEX_LABEL}" "${instruction_dir}/revise-codex.round-${review_round}.md"
+    wait_for_file "${impl_dir}/codex.revise-round-${review_round}.md"
+
+    review_round=$((review_round + 1))
+  done
+
+  cat <<EOF
+council run complete: ${run_dir}
+final plan: ${run_dir}/plan.final.md
+implementation note: ${impl_dir}/codex.md
+reviews:
+  - ${cc_review_path} (${cc_verdict:-UNKNOWN})
+  - ${amp_review_path} (${amp_verdict:-UNKNOWN})
+EOF
+
+  trap - EXIT
+  cleanup_run 0
+}
+
+usage() {
+  cat <<EOF
+council
+
+Usage:
+  council start
+  council status
+  council run <task>
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "${cmd}" in
+    start)
+      start_council "$@"
+      ;;
+    status)
+      status_council "$@"
+      ;;
+    run)
+      run_council "$@"
+      ;;
+    -h|--help|help|"")
+      usage
+      ;;
+    *)
+      die "unknown command: ${cmd}"
+      ;;
+  esac
+}
+
+main "$@"
