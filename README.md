@@ -13,7 +13,8 @@ wrapper and `bin/maestro-council` kept as a compatibility alias.
 ## Model
 
 - Control plane: `tmux-bridge` messages sent into agent panes.
-- Data plane: files written into `council-out/runs/<run-id>/`.
+- Data plane: files written into the active workspace's
+  `council-out/runs/<run-id>/` by default.
 - Default roles:
   - `codex`: primary implementer and final plan synthesizer
   - `cc`: design critic and implementation reviewer
@@ -24,6 +25,10 @@ pane. Agents receive short tmux messages that point them at instruction
 files, and they write their actual artifacts to disk.
 
 Runtime defaults live in [council.conf](council.conf).
+
+By default, `council` targets the `default` instance. Named instances
+append `-<instance>` to the base window and pane labels, which lets you
+run multiple councils side by side in the same tmux session.
 
 ## Layout
 
@@ -45,6 +50,19 @@ Override them with environment variables:
 - `MAESTRO_COUNCIL_CC_CMD`
 - `MAESTRO_COUNCIL_AMP_CMD`
 
+To run multiple councils at once, give each one an instance name:
+
+```bash
+council start --instance feature-a
+council run --instance feature-a "Design option A"
+
+council start --instance feature-b
+council run --instance feature-b "Design option B"
+```
+
+You can also set `MAESTRO_COUNCIL_INSTANCE=<name>` instead of passing
+`--instance` on every command.
+
 ## Workflow
 
 Run the default flow from any pane in the target workspace:
@@ -52,6 +70,13 @@ Run the default flow from any pane in the target workspace:
 ```bash
 council start
 council run "Design a new tmux-native council tool"
+```
+
+Or target a specific named instance:
+
+```bash
+council start --instance infra
+council run --instance infra "Harden the tmux transport layer"
 ```
 
 The default `run` workflow is:
@@ -63,7 +88,18 @@ The default `run` workflow is:
 5. `cc` and `amp` review the resulting implementation.
 6. `cc` and `amp` start their review files with `VERDICT: LGTM` or `VERDICT: REVISE`.
 
-Artifacts are written under:
+`council run` now prints the run directory immediately and records the
+active stage in `stage.txt`. If the run is interrupted or an agent
+stalls, continue from the next incomplete stage with:
+
+```bash
+council resume <run-id>
+```
+
+`council continue <run-id>` is an alias for the same command. Run it
+from the same workspace the council run targets.
+
+Artifacts are written under the active workspace by default:
 
 ```text
 council-out/runs/<run-id>/
@@ -81,10 +117,20 @@ The key outputs are:
 - `implementation/codex.md`
 - `reviews/cc.md`
 - `reviews/amp.md`
+- `stage.txt`
+- `progress.log`
 
 ## Install
 
-Install the script and tmux binding snippet into your local smux setup:
+Install `smux` first. `maestro-council` depends on the tmux layout and
+`tmux-bridge` CLI that `smux` provides:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/XiaoConstantine/smux/main/install.sh | bash
+```
+
+Then install the council commands and tmux binding snippet into that
+smux setup:
 
 ```bash
 ./install.sh
@@ -97,6 +143,7 @@ This will:
 - symlink `bin/council-round` into `~/.smux/bin/council-round`
 - write `~/.smux/maestro-council.conf`
 - print the `source-file` line to add to your tmux config
+- remind you to put `~/.smux/bin` on your shell `PATH` if needed
 
 ## tmux Binding
 

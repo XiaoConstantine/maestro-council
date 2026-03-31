@@ -27,18 +27,19 @@ if [[ -f "${REPO_ROOT}/council.conf" ]]; then
   source "${REPO_ROOT}/council.conf"
 fi
 
-WINDOW_NAME="${MAESTRO_COUNCIL_WINDOW:-maestro-council}"
-CODEX_LABEL="${MAESTRO_COUNCIL_CODEX_LABEL:-council-codex}"
-CC_LABEL="${MAESTRO_COUNCIL_CC_LABEL:-council-cc}"
-AMP_LABEL="${MAESTRO_COUNCIL_AMP_LABEL:-council-amp}"
+BASE_WINDOW_NAME="${MAESTRO_COUNCIL_WINDOW:-maestro-council}"
+BASE_CODEX_LABEL="${MAESTRO_COUNCIL_CODEX_LABEL:-council-codex}"
+BASE_CC_LABEL="${MAESTRO_COUNCIL_CC_LABEL:-council-cc}"
+BASE_AMP_LABEL="${MAESTRO_COUNCIL_AMP_LABEL:-council-amp}"
 
 CODEX_CMD="${MAESTRO_COUNCIL_CODEX_CMD:-codex}"
 CC_CMD="${MAESTRO_COUNCIL_CC_CMD:-claude}"
 AMP_CMD="${MAESTRO_COUNCIL_AMP_CMD:-amp}"
 
-COUNCIL_HOME="${MAESTRO_COUNCIL_HOME:-${REPO_ROOT}/council-out}"
-RUNS_DIR="${COUNCIL_HOME}/runs"
-TMP_DIR="${COUNCIL_HOME}/tmp"
+COUNCIL_HOME_OVERRIDE="${MAESTRO_COUNCIL_HOME:-}"
+COUNCIL_HOME=""
+RUNS_DIR=""
+TMP_DIR=""
 DEFAULT_TIMEOUT="${MAESTRO_COUNCIL_TIMEOUT:-900}"
 POLL_INTERVAL="${MAESTRO_COUNCIL_POLL_INTERVAL:-0.5}"
 MAX_REVIEW_ROUNDS="${MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS:-2}"
@@ -47,6 +48,25 @@ AGENT_READY_TIMEOUT="${MAESTRO_COUNCIL_AGENT_READY_TIMEOUT:-20}"
 CURRENT_RUN_DIR=""
 CURRENT_RUN_ID=""
 CURRENT_MEMBER_LABELS=""
+COUNCIL_INSTANCE=""
+WINDOW_NAME=""
+CODEX_LABEL=""
+CC_LABEL=""
+AMP_LABEL=""
+RUN_DIR=""
+RUN_ID=""
+RUN_TASK=""
+RUN_WORKSPACE=""
+RUN_PLAN_DIR=""
+RUN_CRITIQUE_DIR=""
+RUN_REVIEW_DIR=""
+RUN_IMPL_DIR=""
+RUN_INSTRUCTION_DIR=""
+RUN_BUNDLE_DIR=""
+RUN_CC_REVIEW_PATH=""
+RUN_AMP_REVIEW_PATH=""
+RUN_CC_VERDICT=""
+RUN_AMP_VERDICT=""
 
 # Cached pane IDs (populated by cache_pane_ids)
 PANE_ID_CODEX=""
@@ -56,6 +76,35 @@ PANE_ID_AMP=""
 die() {
   echo "error: $*" >&2
   exit 1
+}
+
+normalize_instance_name() {
+  local raw="${1:-default}"
+  local normalized
+
+  normalized=$(
+    printf '%s' "${raw}" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr -cs '[:alnum:]_.-' '-' \
+      | sed -E 's/^-+//; s/-+$//; s/-{2,}/-/g'
+  )
+  [[ -n "${normalized}" ]] || die "council instance must contain at least one letter or number"
+  printf '%s\n' "${normalized}"
+}
+
+apply_council_instance() {
+  local requested="${1:-default}"
+  local suffix=""
+
+  COUNCIL_INSTANCE=$(normalize_instance_name "${requested}")
+  if [[ "${COUNCIL_INSTANCE}" != "default" ]]; then
+    suffix="-${COUNCIL_INSTANCE}"
+  fi
+
+  WINDOW_NAME="${BASE_WINDOW_NAME}${suffix}"
+  CODEX_LABEL="${BASE_CODEX_LABEL}${suffix}"
+  CC_LABEL="${BASE_CC_LABEL}${suffix}"
+  AMP_LABEL="${BASE_AMP_LABEL}${suffix}"
 }
 
 need_bin() {
@@ -78,6 +127,401 @@ require_tmux() {
 
 ensure_dirs() {
   mkdir -p "${RUNS_DIR}" "${TMP_DIR}"
+}
+
+set_council_paths() {
+  local workspace="$1"
+
+  if [[ -n "${COUNCIL_HOME_OVERRIDE}" ]]; then
+    COUNCIL_HOME="${COUNCIL_HOME_OVERRIDE}"
+  else
+    COUNCIL_HOME="${workspace}/council-out"
+  fi
+
+  RUNS_DIR="${COUNCIL_HOME}/runs"
+  TMP_DIR="${COUNCIL_HOME}/tmp"
+}
+
+read_file_contents() {
+  local path="$1"
+  [[ -f "${path}" ]] || die "missing file: ${path}"
+  perl -0ne 'print' "${path}"
+}
+
+set_run_context() {
+  local run_id="$1"
+  local run_dir="$2"
+  local workspace="$3"
+  local task="$4"
+
+  RUN_ID="${run_id}"
+  RUN_DIR="${run_dir}"
+  RUN_WORKSPACE="${workspace}"
+  RUN_TASK="${task}"
+  RUN_PLAN_DIR="${run_dir}/plans"
+  RUN_CRITIQUE_DIR="${run_dir}/critiques"
+  RUN_REVIEW_DIR="${run_dir}/reviews"
+  RUN_IMPL_DIR="${run_dir}/implementation"
+  RUN_INSTRUCTION_DIR="${run_dir}/instructions"
+  RUN_BUNDLE_DIR="${run_dir}/bundles"
+  RUN_CC_REVIEW_PATH=""
+  RUN_AMP_REVIEW_PATH=""
+  RUN_CC_VERDICT=""
+  RUN_AMP_VERDICT=""
+}
+
+log_run_stage() {
+  local stage="$1"
+  local message="$2"
+
+  if [[ -n "${RUN_DIR}" ]]; then
+    printf '%s\n' "${stage}" > "${RUN_DIR}/stage.txt"
+    printf '%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${stage}" >> "${RUN_DIR}/progress.log"
+  fi
+
+  printf '[council] %s\n' "${message}"
+}
+
+setup_current_run_tracking() {
+  CURRENT_RUN_DIR="${RUN_DIR}"
+  CURRENT_RUN_ID="${RUN_ID}"
+  CURRENT_MEMBER_LABELS="${CODEX_LABEL} ${CC_LABEL} ${AMP_LABEL}"
+}
+
+finalize_run_success() {
+  trap - EXIT
+  cleanup_run 0
+}
+
+run_members() {
+  printf '%s\n' "codex:${CODEX_LABEL}" "cc:${CC_LABEL}" "amp:${AMP_LABEL}"
+}
+
+plans_complete() {
+  [[ -s "${RUN_PLAN_DIR}/codex.md" && -s "${RUN_PLAN_DIR}/cc.md" && -s "${RUN_PLAN_DIR}/amp.md" ]]
+}
+
+critiques_complete() {
+  [[ -s "${RUN_CRITIQUE_DIR}/codex.md" && -s "${RUN_CRITIQUE_DIR}/cc.md" && -s "${RUN_CRITIQUE_DIR}/amp.md" ]]
+}
+
+review_round_complete() {
+  local round="$1"
+  [[ -s "${RUN_REVIEW_DIR}/cc.round-${round}.md" && -s "${RUN_REVIEW_DIR}/amp.round-${round}.md" ]]
+}
+
+review_round_verdicts() {
+  local round="$1"
+  RUN_CC_REVIEW_PATH="${RUN_REVIEW_DIR}/cc.round-${round}.md"
+  RUN_AMP_REVIEW_PATH="${RUN_REVIEW_DIR}/amp.round-${round}.md"
+  RUN_CC_VERDICT=$(review_verdict "${RUN_CC_REVIEW_PATH}")
+  RUN_AMP_VERDICT=$(review_verdict "${RUN_AMP_REVIEW_PATH}")
+}
+
+next_stage_for_run() {
+  local round
+
+  if ! plans_complete; then
+    printf 'plans\n'
+    return
+  fi
+
+  if ! critiques_complete; then
+    printf 'critiques\n'
+    return
+  fi
+
+  if [[ ! -s "${RUN_DIR}/plan.final.md" ]]; then
+    printf 'final-plan\n'
+    return
+  fi
+
+  if [[ ! -s "${RUN_IMPL_DIR}/codex.md" ]]; then
+    printf 'implementation\n'
+    return
+  fi
+
+  for (( round = 1; round <= MAX_REVIEW_ROUNDS; round++ )); do
+    if ! review_round_complete "${round}"; then
+      printf 'reviews-round-%s\n' "${round}"
+      return
+    fi
+
+    review_round_verdicts "${round}"
+    if [[ "${RUN_CC_VERDICT}" == "LGTM" && "${RUN_AMP_VERDICT}" == "LGTM" ]]; then
+      printf 'complete\n'
+      return
+    fi
+
+    if (( round >= MAX_REVIEW_ROUNDS )); then
+      printf 'complete\n'
+      return
+    fi
+
+    if [[ ! -s "${RUN_IMPL_DIR}/codex.revise-round-${round}.md" ]]; then
+      printf 'revise-round-%s\n' "${round}"
+      return
+    fi
+  done
+
+  printf 'complete\n'
+}
+
+resolve_run_dir() {
+  local ref="$1"
+  local candidate
+
+  if [[ -d "${ref}" ]]; then
+    printf '%s\n' "${ref}"
+    return
+  fi
+
+  candidate="${RUNS_DIR}/${ref}"
+  if [[ -d "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return
+  fi
+
+  candidate="${REPO_ROOT}/council-out/runs/${ref}"
+  if [[ -d "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return
+  fi
+
+  die "run not found: ${ref}"
+}
+
+require_workspace_match() {
+  local expected="$1"
+  local cwd
+  cwd=$(current_path)
+
+  [[ "${cwd}" == "${expected}" ]] || die "run this command from the run workspace: ${expected}"
+}
+
+load_run_context_from_dir() {
+  local run_dir="$1"
+  local run_id task workspace instance
+
+  run_id=$(basename "${run_dir}")
+  task=$(read_file_contents "${run_dir}/task.txt")
+  workspace=$(read_file_contents "${run_dir}/workspace.txt")
+  instance="default"
+  if [[ -f "${run_dir}/instance.txt" ]]; then
+    instance=$(read_file_contents "${run_dir}/instance.txt")
+  fi
+
+  apply_council_instance "${instance}"
+  set_council_paths "${workspace}"
+  ensure_dirs
+  set_run_context "${run_id}" "${run_dir}" "${workspace}" "${task}"
+}
+
+initialize_run() {
+  local task="$1"
+  local workspace="$2"
+  local run_id run_dir
+
+  set_council_paths "${workspace}"
+  ensure_dirs
+  run_id=$(date +%Y%m%d-%H%M%S)-$$
+  run_dir="${RUNS_DIR}/${run_id}"
+
+  mkdir -p \
+    "${run_dir}/plans" \
+    "${run_dir}/critiques" \
+    "${run_dir}/reviews" \
+    "${run_dir}/implementation" \
+    "${run_dir}/instructions" \
+    "${run_dir}/bundles"
+
+  printf "%s\n" "${task}" > "${run_dir}/task.txt"
+  printf "%s\n" "${workspace}" > "${run_dir}/workspace.txt"
+  printf "%s\n" "${COUNCIL_INSTANCE}" > "${run_dir}/instance.txt"
+
+  set_run_context "${run_id}" "${run_dir}" "${workspace}" "${task}"
+}
+
+run_stage_plans() {
+  local members=()
+  local member role label instruction artifact
+
+  while IFS= read -r member; do
+    members+=("${member}")
+  done < <(run_members)
+
+  log_run_stage "plans" "collecting independent plans"
+
+  for member in "${members[@]}"; do
+    role=${member%%:*}
+    label=${member##*:}
+    artifact="${RUN_PLAN_DIR}/${role}.md"
+    instruction="${RUN_INSTRUCTION_DIR}/plan-${role}.md"
+    render_template "${REPO_ROOT}/templates/plan.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "" "${role}"
+    if [[ ! -s "${artifact}" ]]; then
+      send_instruction "${label}" "${instruction}"
+    fi
+  done
+
+  wait_for_files "${DEFAULT_TIMEOUT}" \
+    "${RUN_PLAN_DIR}/codex.md" "${RUN_PLAN_DIR}/cc.md" "${RUN_PLAN_DIR}/amp.md"
+
+  write_bundle \
+    "${RUN_BUNDLE_DIR}/plans.md" \
+    "Council Plans" \
+    "${RUN_TASK}" \
+    "codex" "${RUN_PLAN_DIR}/codex.md" \
+    "cc" "${RUN_PLAN_DIR}/cc.md" \
+    "amp" "${RUN_PLAN_DIR}/amp.md"
+
+  log_run_stage "plans-complete" "plans complete; critique stage is ready"
+}
+
+run_stage_critiques() {
+  local members=()
+  local member role label instruction artifact
+
+  while IFS= read -r member; do
+    members+=("${member}")
+  done < <(run_members)
+
+  log_run_stage "critiques" "dispatching critique bundle"
+
+  for member in "${members[@]}"; do
+    role=${member%%:*}
+    label=${member##*:}
+    artifact="${RUN_CRITIQUE_DIR}/${role}.md"
+    instruction="${RUN_INSTRUCTION_DIR}/critique-${role}.md"
+    render_template "${REPO_ROOT}/templates/critique.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_BUNDLE_DIR}/plans.md" "${role}"
+    if [[ ! -s "${artifact}" ]]; then
+      send_instruction "${label}" "${instruction}"
+    fi
+  done
+
+  wait_for_files "${DEFAULT_TIMEOUT}" \
+    "${RUN_CRITIQUE_DIR}/codex.md" "${RUN_CRITIQUE_DIR}/cc.md" "${RUN_CRITIQUE_DIR}/amp.md"
+
+  write_bundle \
+    "${RUN_BUNDLE_DIR}/critiques.md" \
+    "Council Critiques" \
+    "${RUN_TASK}" \
+    "codex" "${RUN_CRITIQUE_DIR}/codex.md" \
+    "cc" "${RUN_CRITIQUE_DIR}/cc.md" \
+    "amp" "${RUN_CRITIQUE_DIR}/amp.md"
+
+  log_run_stage "critiques-complete" "critiques complete; final plan stage is ready"
+}
+
+run_stage_final_plan() {
+  local instruction="${RUN_INSTRUCTION_DIR}/final-plan-codex.md"
+
+  log_run_stage "final-plan" "requesting the final implementation plan from codex"
+
+  render_template "${REPO_ROOT}/templates/final-plan.md.tmpl" \
+    "${instruction}" \
+    "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${RUN_DIR}/plan.final.md" "${RUN_BUNDLE_DIR}/critiques.md" "codex"
+
+  if [[ ! -s "${RUN_DIR}/plan.final.md" ]]; then
+    send_instruction "${CODEX_LABEL}" "${instruction}"
+  fi
+
+  wait_for_file "${RUN_DIR}/plan.final.md"
+  log_run_stage "final-plan-complete" "final plan complete; implementation stage is ready"
+}
+
+run_stage_implementation() {
+  local instruction="${RUN_INSTRUCTION_DIR}/implement-codex.md"
+
+  log_run_stage "implementation" "sending implementation work to codex"
+
+  render_template "${REPO_ROOT}/templates/implement.md.tmpl" \
+    "${instruction}" \
+    "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${RUN_IMPL_DIR}/codex.md" "${RUN_DIR}/plan.final.md" "codex"
+
+  if [[ ! -s "${RUN_IMPL_DIR}/codex.md" ]]; then
+    send_instruction "${CODEX_LABEL}" "${instruction}"
+  fi
+
+  wait_for_file "${RUN_IMPL_DIR}/codex.md"
+  log_run_stage "implementation-complete" "implementation complete; review stage is ready"
+}
+
+run_stage_reviews() {
+  local round role label artifact instruction
+
+  for (( round = 1; round <= MAX_REVIEW_ROUNDS; round++ )); do
+    log_run_stage "reviews-round-${round}" "dispatching review round ${round}"
+
+    for role in cc amp; do
+      if [[ "${role}" == "cc" ]]; then
+        label="${CC_LABEL}"
+      else
+        label="${AMP_LABEL}"
+      fi
+
+      artifact="${RUN_REVIEW_DIR}/${role}.round-${round}.md"
+      instruction="${RUN_INSTRUCTION_DIR}/review-${role}.round-${round}.md"
+      render_template "${REPO_ROOT}/templates/review.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_DIR}/plan.final.md" "${role}"
+      if [[ ! -s "${artifact}" ]]; then
+        send_instruction "${label}" "${instruction}"
+      fi
+    done
+
+    wait_for_files "${DEFAULT_TIMEOUT}" \
+      "${RUN_REVIEW_DIR}/cc.round-${round}.md" \
+      "${RUN_REVIEW_DIR}/amp.round-${round}.md"
+
+    review_round_verdicts "${round}"
+
+    if [[ "${RUN_CC_VERDICT}" == "LGTM" && "${RUN_AMP_VERDICT}" == "LGTM" ]]; then
+      log_run_stage "reviews-complete" "review round ${round} approved the implementation"
+      return
+    fi
+
+    if (( round >= MAX_REVIEW_ROUNDS )); then
+      log_run_stage "reviews-complete" "review rounds exhausted; keeping the final reviewer verdicts"
+      return
+    fi
+
+    write_bundle \
+      "${RUN_BUNDLE_DIR}/reviews.round-${round}.md" \
+      "Council Reviews Round ${round}" \
+      "${RUN_TASK}" \
+      "cc" "${RUN_REVIEW_DIR}/cc.round-${round}.md" \
+      "amp" "${RUN_REVIEW_DIR}/amp.round-${round}.md"
+
+    artifact="${RUN_IMPL_DIR}/codex.revise-round-${round}.md"
+    instruction="${RUN_INSTRUCTION_DIR}/revise-codex.round-${round}.md"
+    log_run_stage "revise-round-${round}" "sending review findings back to codex"
+    render_template "${REPO_ROOT}/templates/revise.md.tmpl" \
+      "${instruction}" \
+      "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_BUNDLE_DIR}/reviews.round-${round}.md" "codex"
+    if [[ ! -s "${artifact}" ]]; then
+      send_instruction "${CODEX_LABEL}" "${instruction}"
+    fi
+    wait_for_file "${artifact}"
+  done
+}
+
+run_pipeline() {
+  run_stage_plans
+  run_stage_critiques
+  run_stage_final_plan
+  run_stage_implementation
+  run_stage_reviews
+}
+
+print_run_summary() {
+  cat <<EOF
+council run complete: ${RUN_DIR}
+instance: ${COUNCIL_INSTANCE}
+stage: $(next_stage_for_run)
+final plan: ${RUN_DIR}/plan.final.md
+implementation note: ${RUN_IMPL_DIR}/codex.md
+reviews:
+  - ${RUN_CC_REVIEW_PATH} (${RUN_CC_VERDICT:-UNKNOWN})
+  - ${RUN_AMP_REVIEW_PATH} (${RUN_AMP_VERDICT:-UNKNOWN})
+EOF
 }
 
 current_session_target() {
@@ -391,11 +835,12 @@ cleanup_run() {
 start_council() {
   local force_recreate="${1:-}"
   require_tmux
-  ensure_dirs
 
   local session_target cwd target display_target
   session_target=$(current_session_target)
   cwd=$(current_path)
+  set_council_paths "${cwd}"
+  ensure_dirs
   target=$(window_target)
   display_target=$(window_display_target)
 
@@ -447,6 +892,7 @@ start_council() {
 
   cat <<EOF
 council started in ${display_target}
+instance: ${COUNCIL_INSTANCE}
 codex:   ${CODEX_LABEL}
 cc:      ${CC_LABEL}
 amp:     ${AMP_LABEL}
@@ -456,150 +902,72 @@ EOF
 
 status_council() {
   require_tmux
+  if [[ "${1:-}" == "--all" ]]; then
+    tmux-bridge list | grep -F -e "${BASE_WINDOW_NAME}" -e "${BASE_CODEX_LABEL}" -e "${BASE_CC_LABEL}" -e "${BASE_AMP_LABEL}" || true
+    return
+  fi
+
   tmux-bridge list | grep -F -e "${CODEX_LABEL}" -e "${CC_LABEL}" -e "${AMP_LABEL}" -e "${WINDOW_NAME}" || true
 }
 
 run_council() {
   require_tmux
-  ensure_dirs
   [[ $# -gt 0 ]] || die "usage: council run <task>"
   start_council --force >/dev/null
 
-  local task workspace run_id run_dir plan_dir critique_dir review_dir impl_dir instruction_dir bundle_dir
+  local task workspace
   task="$*"
   workspace=$(council_workspace)
   [[ -n "${workspace}" ]] || die "council workspace is not set. Run 'council start' from the target workspace first."
-  run_id=$(date +%Y%m%d-%H%M%S)-$$
-  run_dir="${RUNS_DIR}/${run_id}"
-  plan_dir="${run_dir}/plans"
-  critique_dir="${run_dir}/critiques"
-  review_dir="${run_dir}/reviews"
-  impl_dir="${run_dir}/implementation"
-  instruction_dir="${run_dir}/instructions"
-  bundle_dir="${run_dir}/bundles"
-
-  mkdir -p "${plan_dir}" "${critique_dir}" "${review_dir}" "${impl_dir}" "${instruction_dir}" "${bundle_dir}"
-  printf "%s\n" "${task}" > "${run_dir}/task.txt"
-  printf "%s\n" "${workspace}" > "${run_dir}/workspace.txt"
-
-  CURRENT_RUN_DIR="${run_dir}"
-  CURRENT_RUN_ID="${run_id}"
-  CURRENT_MEMBER_LABELS="${CODEX_LABEL} ${CC_LABEL} ${AMP_LABEL}"
+  initialize_run "${task}" "${workspace}"
+  setup_current_run_tracking
   trap 'cleanup_run $?' EXIT
 
-  local members=("codex:${CODEX_LABEL}" "cc:${CC_LABEL}" "amp:${AMP_LABEL}")
-  local member role label instruction artifact
-
-  for member in "${members[@]}"; do
-    role=${member%%:*}
-    label=${member##*:}
-    artifact="${plan_dir}/${role}.md"
-    instruction="${instruction_dir}/plan-${role}.md"
-    render_template "${REPO_ROOT}/templates/plan.md.tmpl" "${instruction}" "${run_id}" "${workspace}" "${task}" "${artifact}" "" "${role}"
-    send_instruction "${label}" "${instruction}"
-  done
-
-  wait_for_files "${DEFAULT_TIMEOUT}" \
-    "${plan_dir}/codex.md" "${plan_dir}/cc.md" "${plan_dir}/amp.md"
-
-  write_bundle \
-    "${bundle_dir}/plans.md" \
-    "Council Plans" \
-    "${task}" \
-    "codex" "${plan_dir}/codex.md" \
-    "cc" "${plan_dir}/cc.md" \
-    "amp" "${plan_dir}/amp.md"
-
-  for member in "${members[@]}"; do
-    role=${member%%:*}
-    label=${member##*:}
-    artifact="${critique_dir}/${role}.md"
-    instruction="${instruction_dir}/critique-${role}.md"
-    render_template "${REPO_ROOT}/templates/critique.md.tmpl" "${instruction}" "${run_id}" "${workspace}" "${task}" "${artifact}" "${bundle_dir}/plans.md" "${role}"
-    send_instruction "${label}" "${instruction}"
-  done
-
-  wait_for_files "${DEFAULT_TIMEOUT}" \
-    "${critique_dir}/codex.md" "${critique_dir}/cc.md" "${critique_dir}/amp.md"
-
-  write_bundle \
-    "${bundle_dir}/critiques.md" \
-    "Council Critiques" \
-    "${task}" \
-    "codex" "${critique_dir}/codex.md" \
-    "cc" "${critique_dir}/cc.md" \
-    "amp" "${critique_dir}/amp.md"
-
-  render_template "${REPO_ROOT}/templates/final-plan.md.tmpl" \
-    "${instruction_dir}/final-plan-codex.md" \
-    "${run_id}" "${workspace}" "${task}" "${run_dir}/plan.final.md" "${bundle_dir}/critiques.md" "codex"
-  send_instruction "${CODEX_LABEL}" "${instruction_dir}/final-plan-codex.md"
-  wait_for_file "${run_dir}/plan.final.md"
-
-  render_template "${REPO_ROOT}/templates/implement.md.tmpl" \
-    "${instruction_dir}/implement-codex.md" \
-    "${run_id}" "${workspace}" "${task}" "${impl_dir}/codex.md" "${run_dir}/plan.final.md" "codex"
-  send_instruction "${CODEX_LABEL}" "${instruction_dir}/implement-codex.md"
-  wait_for_file "${impl_dir}/codex.md"
-
-  local review_round=1
-  local cc_verdict=""
-  local amp_verdict=""
-  local cc_review_path=""
-  local amp_review_path=""
-
-  while (( review_round <= MAX_REVIEW_ROUNDS )); do
-    for member in "cc:${CC_LABEL}" "amp:${AMP_LABEL}"; do
-      role=${member%%:*}
-      label=${member##*:}
-      artifact="${review_dir}/${role}.round-${review_round}.md"
-      instruction="${instruction_dir}/review-${role}.round-${review_round}.md"
-      render_template "${REPO_ROOT}/templates/review.md.tmpl" "${instruction}" "${run_id}" "${workspace}" "${task}" "${artifact}" "${run_dir}/plan.final.md" "${role}"
-      send_instruction "${label}" "${instruction}"
-    done
-
-    cc_review_path="${review_dir}/cc.round-${review_round}.md"
-    amp_review_path="${review_dir}/amp.round-${review_round}.md"
-    wait_for_files "${DEFAULT_TIMEOUT}" "${cc_review_path}" "${amp_review_path}"
-
-    cc_verdict=$(review_verdict "${cc_review_path}")
-    amp_verdict=$(review_verdict "${amp_review_path}")
-
-    if [[ "${cc_verdict}" == "LGTM" && "${amp_verdict}" == "LGTM" ]]; then
-      break
-    fi
-
-    if (( review_round >= MAX_REVIEW_ROUNDS )); then
-      break
-    fi
-
-    write_bundle \
-      "${bundle_dir}/reviews.round-${review_round}.md" \
-      "Council Reviews Round ${review_round}" \
-      "${task}" \
-      "cc" "${cc_review_path}" \
-      "amp" "${amp_review_path}"
-
-    render_template "${REPO_ROOT}/templates/revise.md.tmpl" \
-      "${instruction_dir}/revise-codex.round-${review_round}.md" \
-      "${run_id}" "${workspace}" "${task}" "${impl_dir}/codex.revise-round-${review_round}.md" "${bundle_dir}/reviews.round-${review_round}.md" "codex"
-    send_instruction "${CODEX_LABEL}" "${instruction_dir}/revise-codex.round-${review_round}.md"
-    wait_for_file "${impl_dir}/codex.revise-round-${review_round}.md"
-
-    review_round=$((review_round + 1))
-  done
-
   cat <<EOF
-council run complete: ${run_dir}
-final plan: ${run_dir}/plan.final.md
-implementation note: ${impl_dir}/codex.md
-reviews:
-  - ${cc_review_path} (${cc_verdict:-UNKNOWN})
-  - ${amp_review_path} (${amp_verdict:-UNKNOWN})
+council run started: ${RUN_DIR}
+instance: ${COUNCIL_INSTANCE}
+workspace: ${RUN_WORKSPACE}
+resume: council resume ${RUN_ID}
 EOF
 
-  trap - EXIT
-  cleanup_run 0
+  run_pipeline
+  print_run_summary
+  finalize_run_success
+}
+
+resume_council() {
+  require_tmux
+  [[ $# -gt 0 ]] || die "usage: council resume <run-id-or-path>"
+
+  local run_ref run_dir next_stage
+  run_ref="$1"
+
+  set_council_paths "$(current_path)"
+  run_dir=$(resolve_run_dir "${run_ref}")
+  load_run_context_from_dir "${run_dir}"
+  require_workspace_match "${RUN_WORKSPACE}"
+  start_council >/dev/null
+
+  setup_current_run_tracking
+  trap 'cleanup_run $?' EXIT
+
+  next_stage=$(next_stage_for_run)
+  cat <<EOF
+council resume: ${RUN_DIR}
+instance: ${COUNCIL_INSTANCE}
+workspace: ${RUN_WORKSPACE}
+next stage: ${next_stage}
+EOF
+
+  if [[ "${next_stage}" == "complete" ]]; then
+    print_run_summary
+    finalize_run_success
+    return
+  fi
+
+  run_pipeline
+  print_run_summary
+  finalize_run_success
 }
 
 usage() {
@@ -607,30 +975,109 @@ usage() {
 council
 
 Usage:
-  council start
-  council start --force
-  council reset
-  council status
-  council run <task>
+  council start [--force] [--instance <name>]
+  council reset [--instance <name>]
+  council status [--instance <name>]
+  council status --all
+  council run [--instance <name>] <task>
+  council run [--instance <name>] -- <task starting with dashes>
+  council resume <run-id-or-path>
+  council continue <run-id-or-path>
 EOF
+}
+
+parse_instance_option() {
+  [[ $# -gt 0 ]] || die "missing value for --instance"
+  apply_council_instance "$1"
 }
 
 main() {
   local cmd="${1:-}"
   shift || true
+  apply_council_instance "${MAESTRO_COUNCIL_INSTANCE:-default}"
 
   case "${cmd}" in
     start)
-      start_council "$@"
+      local force=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --force)
+            force="--force"
+            ;;
+          --instance|-i)
+            shift || true
+            parse_instance_option "$@"
+            ;;
+          *)
+            die "usage: council start [--force] [--instance <name>]"
+            ;;
+        esac
+        shift || true
+      done
+      start_council "${force}"
       ;;
     reset)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --instance|-i)
+            shift || true
+            parse_instance_option "$@"
+            ;;
+          *)
+            die "usage: council reset [--instance <name>]"
+            ;;
+        esac
+        shift || true
+      done
       start_council --force
       ;;
     status)
-      status_council "$@"
+      local list_all=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --instance|-i)
+            shift || true
+            parse_instance_option "$@"
+            ;;
+          --all)
+            list_all="--all"
+            ;;
+          *)
+            die "usage: council status [--instance <name>] [--all]"
+            ;;
+        esac
+        shift || true
+      done
+      status_council "${list_all}"
       ;;
     run)
-      run_council "$@"
+      local task_args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --instance|-i)
+            shift || true
+            parse_instance_option "$@"
+            ;;
+          --)
+            shift || true
+            task_args+=("$@")
+            break
+            ;;
+          -*)
+            die "usage: council run [--instance <name>] <task>"
+            ;;
+          *)
+            task_args+=("$@")
+            break
+            ;;
+        esac
+        shift || true
+      done
+      run_council "${task_args[@]}"
+      ;;
+    resume|continue)
+      [[ $# -eq 1 ]] || die "usage: council ${cmd} <run-id-or-path>"
+      resume_council "$1"
       ;;
     -h|--help|help|"")
       usage
