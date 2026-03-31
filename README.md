@@ -44,6 +44,7 @@ Override them with environment variables:
 - `MAESTRO_COUNCIL_CODEX_CMD`
 - `MAESTRO_COUNCIL_CC_CMD`
 - `MAESTRO_COUNCIL_AMP_CMD`
+
 ## Workflow
 
 Run the default flow from any pane in the target workspace:
@@ -93,6 +94,7 @@ This will:
 
 - symlink `bin/council` into `~/.smux/bin/council`
 - symlink `bin/council` into `~/.smux/bin/maestro-council`
+- symlink `bin/council-round` into `~/.smux/bin/council-round`
 - write `~/.smux/maestro-council.conf`
 - print the `source-file` line to add to your tmux config
 
