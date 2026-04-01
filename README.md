@@ -99,6 +99,12 @@ council resume <run-id>
 `council continue <run-id>` is an alias for the same command. Run it
 from the same workspace the council run targets.
 
+`council run` without `--instance` allocates a fresh instance if the
+default council window already exists. Pass `--instance <name>` or set
+`MAESTRO_COUNCIL_INSTANCE` to pin and reuse a specific instance.
+To intentionally recreate an existing instance's panes, use
+`council reset` or `council start --force`.
+
 Artifacts are written under the active workspace by default:
 
 ```text

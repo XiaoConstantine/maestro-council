@@ -49,6 +49,7 @@ CURRENT_RUN_DIR=""
 CURRENT_RUN_ID=""
 CURRENT_MEMBER_LABELS=""
 COUNCIL_INSTANCE=""
+INSTANCE_IS_EXPLICIT=0
 WINDOW_NAME=""
 CODEX_LABEL=""
 CC_LABEL=""
@@ -105,6 +106,18 @@ apply_council_instance() {
   CODEX_LABEL="${BASE_CODEX_LABEL}${suffix}"
   CC_LABEL="${BASE_CC_LABEL}${suffix}"
   AMP_LABEL="${BASE_AMP_LABEL}${suffix}"
+}
+
+window_name_for_instance() {
+  local requested="${1:-default}"
+  local instance suffix=""
+
+  instance=$(normalize_instance_name "${requested}")
+  if [[ "${instance}" != "default" ]]; then
+    suffix="-${instance}"
+  fi
+
+  printf '%s\n' "${BASE_WINDOW_NAME}${suffix}"
 }
 
 need_bin() {
@@ -564,6 +577,11 @@ window_exists() {
   tmux list-windows -t "$(current_session_target)" -F '#W' | grep -Fx "${WINDOW_NAME}" >/dev/null 2>&1
 }
 
+window_name_exists() {
+  local name="$1"
+  tmux list-windows -t "$(current_session_target)" -F '#W' | grep -Fx "${name}" >/dev/null 2>&1
+}
+
 council_workspace() {
   tmux show-options -w -v -t "$(window_target)" @maestro_council_workspace 2>/dev/null || true
 }
@@ -594,6 +612,30 @@ cache_pane_ids() {
   [[ -n "${PANE_ID_CODEX}" ]] || die "cache_pane_ids: no pane for ${CODEX_LABEL}"
   [[ -n "${PANE_ID_CC}" ]]    || die "cache_pane_ids: no pane for ${CC_LABEL}"
   [[ -n "${PANE_ID_AMP}" ]]   || die "cache_pane_ids: no pane for ${AMP_LABEL}"
+}
+
+select_run_instance() {
+  local base candidate counter window_name
+
+  (( INSTANCE_IS_EXPLICIT == 0 )) || return 0
+
+  candidate="${COUNCIL_INSTANCE:-default}"
+  window_name=$(window_name_for_instance "${candidate}")
+  if ! window_name_exists "${window_name}"; then
+    return 0
+  fi
+
+  base="${candidate}"
+  counter=2
+  while true; do
+    candidate="${base}-${counter}"
+    window_name=$(window_name_for_instance "${candidate}")
+    if ! window_name_exists "${window_name}"; then
+      apply_council_instance "${candidate}"
+      return 0
+    fi
+    counter=$((counter + 1))
+  done
 }
 
 resolve_target() {
@@ -913,7 +955,8 @@ status_council() {
 run_council() {
   require_tmux
   [[ $# -gt 0 ]] || die "usage: council run <task>"
-  start_council --force >/dev/null
+  select_run_instance
+  start_council >/dev/null
 
   local task workspace
   task="$*"
@@ -988,12 +1031,17 @@ EOF
 
 parse_instance_option() {
   [[ $# -gt 0 ]] || die "missing value for --instance"
+  INSTANCE_IS_EXPLICIT=1
   apply_council_instance "$1"
 }
 
 main() {
   local cmd="${1:-}"
   shift || true
+
+  if [[ "${MAESTRO_COUNCIL_INSTANCE+x}" == "x" ]]; then
+    INSTANCE_IS_EXPLICIT=1
+  fi
   apply_council_instance "${MAESTRO_COUNCIL_INSTANCE:-default}"
 
   case "${cmd}" in
