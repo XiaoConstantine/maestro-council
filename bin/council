@@ -68,6 +68,8 @@ RUN_CC_REVIEW_PATH=""
 RUN_AMP_REVIEW_PATH=""
 RUN_CC_VERDICT=""
 RUN_AMP_VERDICT=""
+RUN_PHASE=""
+RUN_TARGET=""
 
 # Cached pane IDs (populated by cache_pane_ids)
 PANE_ID_CODEX=""
@@ -181,6 +183,183 @@ set_run_context() {
   RUN_AMP_REVIEW_PATH=""
   RUN_CC_VERDICT=""
   RUN_AMP_VERDICT=""
+  RUN_PHASE=""
+  RUN_TARGET=""
+}
+
+run_target_path() {
+  printf '%s\n' "${RUN_DIR}/target.txt"
+}
+
+run_phase_path() {
+  printf '%s\n' "${RUN_DIR}/phase.txt"
+}
+
+run_workspace_snapshot_path() {
+  printf '%s\n' "${RUN_DIR}/workspace.snapshot.txt"
+}
+
+write_run_target() {
+  local target="$1"
+  RUN_TARGET="${target}"
+  [[ -n "${RUN_DIR}" ]] || return 0
+  printf '%s\n' "${target}" > "$(run_target_path)"
+}
+
+read_run_target() {
+  local path
+  path=$(run_target_path)
+
+  if [[ -f "${path}" ]]; then
+    RUN_TARGET=$(read_file_contents "${path}")
+  else
+    RUN_TARGET="complete"
+  fi
+
+  printf '%s\n' "${RUN_TARGET}"
+}
+
+infer_run_phase() {
+  if [[ -s "${RUN_IMPL_DIR}/codex.md" ]]; then
+    if [[ "$(next_stage_for_run)" == "complete" ]]; then
+      printf 'complete\n'
+    else
+      printf 'execution\n'
+    fi
+    return
+  fi
+
+  if [[ -s "${RUN_DIR}/plan.final.md" ]]; then
+    printf 'plan-complete\n'
+    return
+  fi
+
+  printf 'planning\n'
+}
+
+write_run_phase() {
+  local phase="$1"
+  RUN_PHASE="${phase}"
+  [[ -n "${RUN_DIR}" ]] || return 0
+  printf '%s\n' "${phase}" > "$(run_phase_path)"
+  printf '%s\tphase:%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${phase}" >> "${RUN_DIR}/progress.log"
+}
+
+read_run_phase() {
+  local path
+  path=$(run_phase_path)
+
+  if [[ -f "${path}" ]]; then
+    RUN_PHASE=$(read_file_contents "${path}")
+  else
+    RUN_PHASE=$(infer_run_phase)
+  fi
+
+  printf '%s\n' "${RUN_PHASE}"
+}
+
+workspace_git_present() {
+  git -C "${RUN_WORKSPACE}" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+workspace_git_branch() {
+  git -C "${RUN_WORKSPACE}" rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
+
+workspace_git_head() {
+  git -C "${RUN_WORKSPACE}" rev-parse HEAD 2>/dev/null || true
+}
+
+workspace_git_dirty() {
+  if [[ -n "$(git -C "${RUN_WORKSPACE}" status --short 2>/dev/null)" ]]; then
+    printf 'dirty\n'
+  else
+    printf 'clean\n'
+  fi
+}
+
+write_workspace_snapshot() {
+  local path branch head dirty
+  path=$(run_workspace_snapshot_path)
+
+  if workspace_git_present; then
+    branch=$(workspace_git_branch)
+    head=$(workspace_git_head)
+    dirty=$(workspace_git_dirty)
+    {
+      printf 'workspace=%s\n' "${RUN_WORKSPACE}"
+      printf 'git=yes\n'
+      printf 'branch=%s\n' "${branch}"
+      printf 'head=%s\n' "${head}"
+      printf 'dirty=%s\n' "${dirty}"
+    } > "${path}"
+    return
+  fi
+
+  {
+    printf 'workspace=%s\n' "${RUN_WORKSPACE}"
+    printf 'git=no\n'
+    printf 'branch=\n'
+    printf 'head=\n'
+    printf 'dirty=\n'
+  } > "${path}"
+}
+
+workspace_snapshot_field() {
+  local path="$1"
+  local field="$2"
+
+  awk -F= -v field="${field}" '$1 == field { print substr($0, length($1) + 2); exit }' "${path}"
+}
+
+check_workspace_snapshot() {
+  local path recorded_workspace recorded_git recorded_branch recorded_head recorded_dirty
+  local current_workspace current_git current_branch current_head current_dirty
+  local drift=0
+
+  path=$(run_workspace_snapshot_path)
+  [[ -f "${path}" ]] || return 0
+
+  recorded_workspace=$(workspace_snapshot_field "${path}" "workspace")
+  recorded_git=$(workspace_snapshot_field "${path}" "git")
+  recorded_branch=$(workspace_snapshot_field "${path}" "branch")
+  recorded_head=$(workspace_snapshot_field "${path}" "head")
+  recorded_dirty=$(workspace_snapshot_field "${path}" "dirty")
+
+  current_workspace="${RUN_WORKSPACE}"
+  if workspace_git_present; then
+    current_git="yes"
+    current_branch=$(workspace_git_branch)
+    current_head=$(workspace_git_head)
+    current_dirty=$(workspace_git_dirty)
+  else
+    current_git="no"
+    current_branch=""
+    current_head=""
+    current_dirty=""
+  fi
+
+  if [[ "${recorded_workspace}" != "${current_workspace}" ]]; then
+    printf 'workspace snapshot mismatch: recorded workspace %s, current workspace %s\n' "${recorded_workspace}" "${current_workspace}" >&2
+    drift=1
+  fi
+  if [[ "${recorded_git}" != "${current_git}" ]]; then
+    printf 'workspace snapshot mismatch: recorded git=%s, current git=%s\n' "${recorded_git}" "${current_git}" >&2
+    drift=1
+  fi
+  if [[ "${recorded_branch}" != "${current_branch}" ]]; then
+    printf 'workspace snapshot mismatch: recorded branch=%s, current branch=%s\n' "${recorded_branch}" "${current_branch}" >&2
+    drift=1
+  fi
+  if [[ "${recorded_head}" != "${current_head}" ]]; then
+    printf 'workspace snapshot mismatch: recorded head=%s, current head=%s\n' "${recorded_head}" "${current_head}" >&2
+    drift=1
+  fi
+  if [[ "${recorded_dirty}" != "${current_dirty}" ]]; then
+    printf 'workspace snapshot warning: recorded dirty=%s, current dirty=%s\n' "${recorded_dirty}" "${current_dirty}" >&2
+  fi
+
+  return "${drift}"
 }
 
 log_run_stage() {
@@ -232,7 +411,11 @@ review_round_verdicts() {
 }
 
 next_stage_for_run() {
-  local round
+  local round target="complete"
+
+  if [[ -n "${RUN_DIR}" ]]; then
+    target=$(read_run_target)
+  fi
 
   if ! plans_complete; then
     printf 'plans\n'
@@ -246,6 +429,11 @@ next_stage_for_run() {
 
   if [[ ! -s "${RUN_DIR}/plan.final.md" ]]; then
     printf 'final-plan\n'
+    return
+  fi
+
+  if [[ "${target}" == "plan" ]]; then
+    printf 'complete\n'
     return
   fi
 
@@ -328,11 +516,14 @@ load_run_context_from_dir() {
   set_council_paths "${workspace}"
   ensure_dirs
   set_run_context "${run_id}" "${run_dir}" "${workspace}" "${task}"
+  read_run_target >/dev/null
+  read_run_phase >/dev/null
 }
 
 initialize_run() {
   local task="$1"
   local workspace="$2"
+  local target="${3:-complete}"
   local run_id run_dir
 
   set_council_paths "${workspace}"
@@ -353,6 +544,8 @@ initialize_run() {
   printf "%s\n" "${COUNCIL_INSTANCE}" > "${run_dir}/instance.txt"
 
   set_run_context "${run_id}" "${run_dir}" "${workspace}" "${task}"
+  write_run_target "${target}"
+  write_run_phase "planning"
 }
 
 run_stage_plans() {
@@ -439,12 +632,15 @@ run_stage_final_plan() {
   fi
 
   wait_for_file "${RUN_DIR}/plan.final.md"
-  log_run_stage "final-plan-complete" "final plan complete; implementation stage is ready"
+  write_workspace_snapshot
+  write_run_phase "plan-complete"
+  log_run_stage "final-plan-complete" "final plan complete; execution is ready"
 }
 
 run_stage_implementation() {
   local instruction="${RUN_INSTRUCTION_DIR}/implement-codex.md"
 
+  write_run_phase "execution"
   log_run_stage "implementation" "sending implementation work to codex"
 
   render_template "${REPO_ROOT}/templates/implement.md.tmpl" \
@@ -487,11 +683,13 @@ run_stage_reviews() {
     review_round_verdicts "${round}"
 
     if [[ "${RUN_CC_VERDICT}" == "LGTM" && "${RUN_AMP_VERDICT}" == "LGTM" ]]; then
+      write_run_phase "complete"
       log_run_stage "reviews-complete" "review round ${round} approved the implementation"
       return
     fi
 
     if (( round >= MAX_REVIEW_ROUNDS )); then
+      write_run_phase "complete"
       log_run_stage "reviews-complete" "review rounds exhausted; keeping the final reviewer verdicts"
       return
     fi
@@ -516,25 +714,104 @@ run_stage_reviews() {
   done
 }
 
+run_planning_pipeline() {
+  local next_stage="${1:-$(next_stage_for_run)}"
+
+  write_run_phase "planning"
+
+  case "${next_stage}" in
+    plans)
+      run_stage_plans
+      run_stage_critiques
+      run_stage_final_plan
+      ;;
+    critiques)
+      run_stage_critiques
+      run_stage_final_plan
+      ;;
+    final-plan)
+      run_stage_final_plan
+      ;;
+    complete)
+      return
+      ;;
+    *)
+      die "unexpected planning stage: ${next_stage}"
+      ;;
+  esac
+}
+
+run_execution_pipeline() {
+  local next_stage="${1:-$(next_stage_for_run)}"
+
+  case "${next_stage}" in
+    implementation)
+      run_stage_implementation
+      run_stage_reviews
+      ;;
+    reviews-round-*|revise-round-*)
+      run_stage_reviews
+      ;;
+    complete)
+      return
+      ;;
+    *)
+      die "unexpected execution stage: ${next_stage}"
+      ;;
+  esac
+}
+
+run_pipeline_to_target() {
+  local next_stage="${1:-$(next_stage_for_run)}"
+
+  if [[ "${next_stage}" == "complete" ]]; then
+    return
+  fi
+
+  case "${next_stage}" in
+    plans|critiques|final-plan)
+      run_planning_pipeline "${next_stage}"
+      next_stage=$(next_stage_for_run)
+      ;;
+  esac
+
+  if [[ "${next_stage}" == "complete" ]]; then
+    return
+  fi
+
+  run_execution_pipeline "${next_stage}"
+}
+
 run_pipeline() {
-  run_stage_plans
-  run_stage_critiques
-  run_stage_final_plan
-  run_stage_implementation
-  run_stage_reviews
+  run_pipeline_to_target "$(next_stage_for_run)"
 }
 
 print_run_summary() {
+  local phase target stage
+
+  phase=$(read_run_phase)
+  target=$(read_run_target)
+  stage=$(next_stage_for_run)
+
   cat <<EOF
-council run complete: ${RUN_DIR}
+council run status: ${RUN_DIR}
 instance: ${COUNCIL_INSTANCE}
-stage: $(next_stage_for_run)
+phase: ${phase}
+target: ${target}
+stage: ${stage}
 final plan: ${RUN_DIR}/plan.final.md
+EOF
+
+  if [[ -s "${RUN_IMPL_DIR}/codex.md" ]]; then
+    cat <<EOF
 implementation note: ${RUN_IMPL_DIR}/codex.md
 reviews:
   - ${RUN_CC_REVIEW_PATH} (${RUN_CC_VERDICT:-UNKNOWN})
   - ${RUN_AMP_REVIEW_PATH} (${RUN_AMP_VERDICT:-UNKNOWN})
 EOF
+  elif [[ "${target}" == "plan" && "${stage}" == "complete" ]]; then
+    printf 'next action: council exec %s\n' "${RUN_ID}"
+  fi
 }
 
 current_session_target() {
@@ -962,7 +1239,7 @@ run_council() {
   task="$*"
   workspace=$(council_workspace)
   [[ -n "${workspace}" ]] || die "council workspace is not set. Run 'council start' from the target workspace first."
-  initialize_run "${task}" "${workspace}"
+  initialize_run "${task}" "${workspace}" "complete"
   setup_current_run_tracking
   trap 'cleanup_run $?' EXIT
 
@@ -974,6 +1251,74 @@ resume: council resume ${RUN_ID}
 EOF
 
   run_pipeline
+  print_run_summary
+  finalize_run_success
+}
+
+plan_council() {
+  require_tmux
+  [[ $# -gt 0 ]] || die "usage: council plan <task>"
+  select_run_instance
+  start_council >/dev/null
+
+  local task workspace
+  task="$*"
+  workspace=$(council_workspace)
+  [[ -n "${workspace}" ]] || die "council workspace is not set. Run 'council start' from the target workspace first."
+  initialize_run "${task}" "${workspace}" "plan"
+  setup_current_run_tracking
+  trap 'cleanup_run $?' EXIT
+
+  cat <<EOF
+council plan started: ${RUN_DIR}
+instance: ${COUNCIL_INSTANCE}
+workspace: ${RUN_WORKSPACE}
+resume: council resume ${RUN_ID}
+EOF
+
+  run_pipeline
+  print_run_summary
+  finalize_run_success
+}
+
+exec_council() {
+  require_tmux
+  [[ $# -eq 1 ]] || die "usage: council exec <run-id-or-path>"
+
+  local run_ref run_dir next_stage snapshot_path
+  run_ref="$1"
+
+  set_council_paths "$(current_path)"
+  run_dir=$(resolve_run_dir "${run_ref}")
+  load_run_context_from_dir "${run_dir}"
+  [[ -s "${RUN_DIR}/plan.final.md" ]] || die "plan phase is not complete for run ${RUN_ID}"
+
+  snapshot_path=$(run_workspace_snapshot_path)
+  [[ -f "${snapshot_path}" ]] || die "missing workspace snapshot for run ${RUN_ID}; re-run planning before execution"
+
+  require_workspace_match "${RUN_WORKSPACE}"
+  check_workspace_snapshot || die "workspace drift detected since planning; inspect ${snapshot_path} or re-run council plan"
+
+  start_council --force >/dev/null
+  write_run_target "complete"
+  setup_current_run_tracking
+  trap 'cleanup_run $?' EXIT
+
+  next_stage=$(next_stage_for_run)
+  cat <<EOF
+council exec: ${RUN_DIR}
+instance: ${COUNCIL_INSTANCE}
+workspace: ${RUN_WORKSPACE}
+next stage: ${next_stage}
+EOF
+
+  if [[ "${next_stage}" == "complete" ]]; then
+    print_run_summary
+    finalize_run_success
+    return
+  fi
+
+  run_execution_pipeline "${next_stage}"
   print_run_summary
   finalize_run_success
 }
@@ -1008,7 +1353,7 @@ EOF
     return
   fi
 
-  run_pipeline
+  run_pipeline_to_target "${next_stage}"
   print_run_summary
   finalize_run_success
 }
@@ -1022,6 +1367,8 @@ Usage:
   council reset [--instance <name>]
   council status [--instance <name>]
   council status --all
+  council plan [--instance <name>] <task>
+  council exec <run-id-or-path>
   council run [--instance <name>] <task>
   council run [--instance <name>] -- <task starting with dashes>
   council resume <run-id-or-path>
@@ -1097,6 +1444,35 @@ main() {
         shift || true
       done
       status_council "${list_all}"
+      ;;
+    plan)
+      local task_args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --instance|-i)
+            shift || true
+            parse_instance_option "$@"
+            ;;
+          --)
+            shift || true
+            task_args+=("$@")
+            break
+            ;;
+          -*)
+            die "usage: council plan [--instance <name>] <task>"
+            ;;
+          *)
+            task_args+=("$@")
+            break
+            ;;
+        esac
+        shift || true
+      done
+      plan_council "${task_args[@]}"
+      ;;
+    exec)
+      [[ $# -eq 1 ]] || die "usage: council exec <run-id-or-path>"
+      exec_council "$1"
       ;;
     run)
       local task_args=()

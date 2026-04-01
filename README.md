@@ -2,9 +2,8 @@
 
 `maestro-council` is a tmux-first council runner built on top of
 `tmux-bridge`. It starts a fixed council of `codex`, `cc` (Claude Code),
-and `amp`, then coordinates a design -> critique -> implementation ->
-review workflow using tmux for control messages and shared files for
-artifacts.
+and `amp`, then coordinates a planning phase and execution phase using
+tmux for control messages and shared files for artifacts.
 
 The repo is deliberately shell-first. The public entry point is
 `bin/council`, with `bin/council-round` available as a thin orchestration
@@ -65,7 +64,7 @@ You can also set `MAESTRO_COUNCIL_INSTANCE=<name>` instead of passing
 
 ## Workflow
 
-Run the default flow from any pane in the target workspace:
+Run the default end-to-end flow from any pane in the target workspace:
 
 ```bash
 council start
@@ -88,9 +87,36 @@ The default `run` workflow is:
 5. `cc` and `amp` review the resulting implementation.
 6. `cc` and `amp` start their review files with `VERDICT: LGTM` or `VERDICT: REVISE`.
 
-`council run` now prints the run directory immediately and records the
-active stage in `stage.txt`. If the run is interrupted or an agent
-stalls, continue from the next incomplete stage with:
+For an explicit handoff between planning and execution, use:
+
+```bash
+council start
+council plan "Design a new tmux-native council tool"
+
+# review council-out/runs/<run-id>/plan.final.md
+council exec <run-id>
+```
+
+`council plan` runs only the planning stages:
+
+1. Independent plans
+2. Cross-critiques
+3. Final merged plan
+
+It then stops and records:
+
+- `target.txt` as `plan`
+- `phase.txt` as `plan-complete`
+- `workspace.snapshot.txt` with the workspace path, branch, HEAD, and dirty state
+
+`council exec` loads an existing run, verifies `plan.final.md` exists,
+checks `workspace.snapshot.txt` for drift, upgrades `target.txt` to
+`complete`, and runs only the execution stages.
+
+Each run records the active stage in `stage.txt`, the coarse phase in
+`phase.txt`, and the intended stop boundary in `target.txt`. If a run is
+interrupted or an agent stalls, continue from the next incomplete stage
+with:
 
 ```bash
 council resume <run-id>
@@ -121,8 +147,13 @@ The key outputs are:
 - `critiques/amp.md`
 - `plan.final.md`
 - `implementation/codex.md`
-- `reviews/cc.md`
-- `reviews/amp.md`
+- `implementation/codex.revise-round-N.md`
+- `reviews/cc.round-N.md`
+- `reviews/amp.round-N.md`
+- `bundles/reviews.round-N.md`
+- `target.txt`
+- `phase.txt`
+- `workspace.snapshot.txt`
 - `stage.txt`
 - `progress.log`
 
