@@ -12,7 +12,7 @@ wrapper and `bin/maestro-council` kept as a compatibility alias.
 
 ## Model
 
-- Control plane: `tmux-bridge` messages sent into agent panes.
+- Control plane: one-way `tmux-bridge send` messages sent into agent panes.
 - Data plane: files written into the active workspace's
   `council-out/runs/<run-id>/` by default.
 - Default roles:
@@ -21,8 +21,8 @@ wrapper and `bin/maestro-council` kept as a compatibility alias.
   - `amp`: design critic and implementation reviewer
 
 This avoids trying to move long, structured outputs through a terminal
-pane. Agents receive short tmux messages that point them at instruction
-files, and they write their actual artifacts to disk.
+pane. Agents receive short one-way tmux messages that point them at
+instruction files, and they write their actual artifacts to disk.
 
 Runtime defaults live in [council.conf](council.conf).
 

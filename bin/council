@@ -120,9 +120,9 @@ require_tmux() {
   # Export socket path so tmux-bridge skips auto-detection on every call
   export TMUX_BRIDGE_SOCKET="${TMUX_BRIDGE_SOCKET:-${TMUX%%,*}}"
 
-  # Verify tmux-bridge supports msgsend (required after fallback removal)
-  tmux-bridge help 2>/dev/null | grep -Fq 'msgsend <target> <text>' \
-    || die "tmux-bridge does not support 'msgsend'. Please upgrade tmux-bridge."
+  # Verify tmux-bridge supports one-way send for council dispatch messages.
+  tmux-bridge help 2>/dev/null | grep -Eq '^[[:space:]]*send <target> <text>[[:space:]]' \
+    || die "tmux-bridge does not support 'send'. Please upgrade tmux-bridge."
 }
 
 ensure_dirs() {
@@ -615,10 +615,10 @@ send_instruction() {
 
   pane_id=$(resolve_target "${label}") || die "cannot resolve target: ${label}"
 
-  if ! tmux-bridge msgsend "${pane_id}" "${message}" >/dev/null 2>&1; then
+  if ! tmux-bridge send "${pane_id}" "${message}" >/dev/null 2>&1; then
     cache_pane_ids
     pane_id=$(resolve_target "${label}") || die "cannot resolve target after refresh: ${label}"
-    tmux-bridge msgsend "${pane_id}" "${message}" >/dev/null || die "send failed for ${label} after cache refresh"
+    tmux-bridge send "${pane_id}" "${message}" >/dev/null || die "send failed for ${label} after cache refresh"
   fi
 }
 
@@ -628,7 +628,7 @@ safe_notice() {
   local pane_id
 
   pane_id=$(resolve_target "${label}" 2>/dev/null) || return 0
-  tmux-bridge msgsend "${pane_id}" "${message}" >/dev/null 2>&1 || return 0
+  tmux-bridge send "${pane_id}" "${message}" >/dev/null 2>&1 || return 0
 }
 
 wait_for_file() {
