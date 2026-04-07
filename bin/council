@@ -563,7 +563,7 @@ run_stage_plans() {
     label=${member##*:}
     artifact="${RUN_PLAN_DIR}/${role}.md"
     instruction="${RUN_INSTRUCTION_DIR}/plan-${role}.md"
-    render_template "${REPO_ROOT}/templates/plan.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "" "${role}"
+    render_instruction "${REPO_ROOT}/templates/plan.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "" "${role}"
     if [[ ! -s "${artifact}" ]]; then
       send_instruction "${label}" "${instruction}"
     fi
@@ -598,7 +598,7 @@ run_stage_critiques() {
     label=${member##*:}
     artifact="${RUN_CRITIQUE_DIR}/${role}.md"
     instruction="${RUN_INSTRUCTION_DIR}/critique-${role}.md"
-    render_template "${REPO_ROOT}/templates/critique.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_BUNDLE_DIR}/plans.md" "${role}"
+    render_instruction "${REPO_ROOT}/templates/critique.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_BUNDLE_DIR}/plans.md" "${role}"
     if [[ ! -s "${artifact}" ]]; then
       send_instruction "${label}" "${instruction}"
     fi
@@ -623,7 +623,7 @@ run_stage_final_plan() {
 
   log_run_stage "final-plan" "requesting the final implementation plan from codex"
 
-  render_template "${REPO_ROOT}/templates/final-plan.md.tmpl" \
+  render_instruction "${REPO_ROOT}/templates/final-plan.md.tmpl" \
     "${instruction}" \
     "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${RUN_DIR}/plan.final.md" "${RUN_BUNDLE_DIR}/critiques.md" "codex"
 
@@ -643,7 +643,7 @@ run_stage_implementation() {
   write_run_phase "execution"
   log_run_stage "implementation" "sending implementation work to codex"
 
-  render_template "${REPO_ROOT}/templates/implement.md.tmpl" \
+  render_instruction "${REPO_ROOT}/templates/implement.md.tmpl" \
     "${instruction}" \
     "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${RUN_IMPL_DIR}/codex.md" "${RUN_DIR}/plan.final.md" "codex"
 
@@ -670,7 +670,7 @@ run_stage_reviews() {
 
       artifact="${RUN_REVIEW_DIR}/${role}.round-${round}.md"
       instruction="${RUN_INSTRUCTION_DIR}/review-${role}.round-${round}.md"
-      render_template "${REPO_ROOT}/templates/review.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_DIR}/plan.final.md" "${role}"
+      render_instruction "${REPO_ROOT}/templates/review.md.tmpl" "${instruction}" "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_DIR}/plan.final.md" "${role}"
       if [[ ! -s "${artifact}" ]]; then
         send_instruction "${label}" "${instruction}"
       fi
@@ -704,7 +704,7 @@ run_stage_reviews() {
     artifact="${RUN_IMPL_DIR}/codex.revise-round-${round}.md"
     instruction="${RUN_INSTRUCTION_DIR}/revise-codex.round-${round}.md"
     log_run_stage "revise-round-${round}" "sending review findings back to codex"
-    render_template "${REPO_ROOT}/templates/revise.md.tmpl" \
+    render_instruction "${REPO_ROOT}/templates/revise.md.tmpl" \
       "${instruction}" \
       "${RUN_ID}" "${RUN_WORKSPACE}" "${RUN_TASK}" "${artifact}" "${RUN_BUNDLE_DIR}/reviews.round-${round}.md" "codex"
     if [[ ! -s "${artifact}" ]]; then
@@ -1015,6 +1015,81 @@ render_template() {
   ' "${template}" > "${output}"
 }
 
+append_instruction_tmux_context() {
+  local instruction="$1"
+  local role="$2"
+  local session_name window_name
+  local self_label self_pane
+  local peer_one_role peer_one_label peer_one_pane
+  local peer_two_role peer_two_label peer_two_pane
+
+  cache_pane_ids
+  session_name=$(current_session_name)
+  window_name=$(window_display_target)
+
+  case "${role}" in
+    codex)
+      self_label="${CODEX_LABEL}"
+      self_pane="${PANE_ID_CODEX}"
+      peer_one_role="cc"
+      peer_one_label="${CC_LABEL}"
+      peer_one_pane="${PANE_ID_CC}"
+      peer_two_role="amp"
+      peer_two_label="${AMP_LABEL}"
+      peer_two_pane="${PANE_ID_AMP}"
+      ;;
+    cc)
+      self_label="${CC_LABEL}"
+      self_pane="${PANE_ID_CC}"
+      peer_one_role="codex"
+      peer_one_label="${CODEX_LABEL}"
+      peer_one_pane="${PANE_ID_CODEX}"
+      peer_two_role="amp"
+      peer_two_label="${AMP_LABEL}"
+      peer_two_pane="${PANE_ID_AMP}"
+      ;;
+    amp)
+      self_label="${AMP_LABEL}"
+      self_pane="${PANE_ID_AMP}"
+      peer_one_role="codex"
+      peer_one_label="${CODEX_LABEL}"
+      peer_one_pane="${PANE_ID_CODEX}"
+      peer_two_role="cc"
+      peer_two_label="${CC_LABEL}"
+      peer_two_pane="${PANE_ID_CC}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  cat >> "${instruction}" <<EOF
+
+Tmux coordination:
+- Current tmux session: ${session_name}
+- Council window: ${window_name}
+- Your pane target: ${self_pane} (${self_label})
+- Other council peers in this same tmux session:
+  - ${peer_one_role}: ${peer_one_pane} (${peer_one_label})
+  - ${peer_two_role}: ${peer_two_pane} (${peer_two_label})
+- If you need to contact a peer, target the pane ID above with tmux-bridge instead of relying on labels alone.
+EOF
+}
+
+render_instruction() {
+  local template="$1"
+  local output="$2"
+  local run_id="$3"
+  local workspace="$4"
+  local task="$5"
+  local artifact="$6"
+  local bundle="${7:-}"
+  local role="${8:-}"
+
+  render_template "${template}" "${output}" "${run_id}" "${workspace}" "${task}" "${artifact}" "${bundle}" "${role}"
+  append_instruction_tmux_context "${output}" "${role}"
+}
+
 review_verdict() {
   local file="$1"
   awk '
@@ -1106,7 +1181,11 @@ wait_for_agent_ready() {
   local timeout="${2:-${AGENT_READY_TIMEOUT}}"
   local pane_id pattern output waited=0
 
-  pane_id=$(tmux-bridge resolve "${label}" 2>/dev/null || true)
+  pane_id=$(resolve_target "${label}" 2>/dev/null || true)
+  if [[ -z "${pane_id}" ]]; then
+    cache_pane_ids
+    pane_id=$(resolve_target "${label}" 2>/dev/null || true)
+  fi
   [[ -n "${pane_id}" ]] || die "no pane found with label '${label}'"
   pattern=$(agent_ready_pattern "${label}")
 
