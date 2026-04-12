@@ -1104,18 +1104,161 @@ resolve_target() {
   esac
 }
 
+agent_command_string() {
+  local label="$1"
+
+  case "${label}" in
+    "${CODEX_LABEL}") printf '%s\n' "${CODEX_CMD}" ;;
+    "${CC_LABEL}")    printf '%s\n' "${CC_CMD}" ;;
+    "${AMP_LABEL}")   printf '%s\n' "${AMP_CMD}" ;;
+    *)                return 1 ;;
+  esac
+}
+
+agent_expected_command() {
+  local label="$1"
+  local cmd token env_mode=0
+  local parts=()
+
+  cmd=$(agent_command_string "${label}") || return 1
+  read -r -a parts <<< "${cmd}"
+
+  for token in "${parts[@]}"; do
+    case "${token}" in
+      env)
+        env_mode=1
+        continue
+        ;;
+      command|exec)
+        continue
+        ;;
+      *=*)
+        continue
+        ;;
+      --)
+        continue
+        ;;
+      -*)
+        if (( env_mode == 1 )); then
+          continue
+        fi
+        ;;
+    esac
+
+    token=${token##*/}
+    [[ -n "${token}" ]] || continue
+    printf '%s\n' "${token}"
+    return 0
+  done
+
+  return 1
+}
+
+pane_current_command() {
+  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null || true
+}
+
+pane_recent_output() {
+  tmux capture-pane -t "$1" -p -S -80 2>/dev/null || true
+}
+
+agent_ready_pattern() {
+  local label="$1"
+
+  case "${label}" in
+    "${CODEX_LABEL}")
+      printf '%s\n' 'OpenAI Codex|/model to change|/rename to rename your threads'
+      ;;
+    "${CC_LABEL}")
+      printf '%s\n' 'Claude Code|Welcome back|Claude Max'
+      ;;
+    "${AMP_LABEL}")
+      printf '%s\n' 'Welcome to Amp|Ctrl\+O for help|\? for shortcuts'
+      ;;
+    *)
+      printf '%s\n' '.'
+      ;;
+  esac
+}
+
+agent_exit_code_from_output() {
+  printf '%s\n' "$1" | sed -En 's/.*\[maestro-council\] agent exited with code ([0-9]+).*/\1/p' | head -n 1
+}
+
+agent_health_issue() {
+  local label="$1"
+  local pane_id="$2"
+  local expected current output exit_code
+
+  expected=$(agent_expected_command "${label}" 2>/dev/null || true)
+  current=$(pane_current_command "${pane_id}")
+  output=$(pane_recent_output "${pane_id}")
+  exit_code=$(agent_exit_code_from_output "${output}")
+
+  if [[ -n "${exit_code}" ]]; then
+    if [[ -n "${current}" ]]; then
+      printf '%s failed to start or exited with code %s (pane current command: %s)' "${label}" "${exit_code}" "${current}"
+    else
+      printf '%s failed to start or exited with code %s' "${label}" "${exit_code}"
+    fi
+    return 0
+  fi
+
+  if [[ -n "${expected}" && "${current}" != "${expected}" ]]; then
+    if [[ -n "${current}" ]]; then
+      printf '%s is not running (expected %s, pane current command is %s)' "${label}" "${expected}" "${current}"
+    else
+      printf '%s is not running (expected %s)' "${label}" "${expected}"
+    fi
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_live_target() {
+  local label="$1"
+  local pane_id issue
+
+  pane_id=$(resolve_target "${label}") || die "cannot resolve target: ${label}"
+  issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
+  if [[ -n "${issue}" ]]; then
+    cache_pane_ids
+    pane_id=$(resolve_target "${label}") || die "cannot resolve target after refresh: ${label}"
+    issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
+    [[ -z "${issue}" ]] || die "${issue}"
+  fi
+
+  printf '%s\n' "${pane_id}"
+}
+
+council_agents_running() {
+  local label pane_id issue
+
+  cache_pane_ids
+  for label in "${CODEX_LABEL}" "${CC_LABEL}" "${AMP_LABEL}"; do
+    pane_id=$(resolve_target "${label}") || return 1
+    issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
+    if [[ -n "${issue}" ]]; then
+      printf '%s\n' "${issue}" >&2
+      return 1
+    fi
+  done
+
+  return 0
+}
+
 send_instruction() {
   local label="$1"
   local instruction="$2"
   local message="Council task ready. Read and execute: ${instruction}"
   local pane_id
 
-  pane_id=$(resolve_target "${label}") || die "cannot resolve target: ${label}"
+  pane_id=$(resolve_live_target "${label}")
 
   if [[ "${label}" == "${CODEX_LABEL}" ]]; then
     if ! tmux send-keys -t "${pane_id}" -l -- "${message}" >/dev/null 2>&1; then
-      cache_pane_ids
-      pane_id=$(resolve_target "${label}") || die "cannot resolve target after refresh: ${label}"
+      pane_id=$(resolve_live_target "${label}")
       tmux send-keys -t "${pane_id}" -l -- "${message}" >/dev/null || die "send failed for ${label} after cache refresh"
     fi
     sleep 0.1
@@ -1124,8 +1267,7 @@ send_instruction() {
   fi
 
   if ! tmux-bridge send "${pane_id}" "${message}" >/dev/null 2>&1; then
-    cache_pane_ids
-    pane_id=$(resolve_target "${label}") || die "cannot resolve target after refresh: ${label}"
+    pane_id=$(resolve_live_target "${label}")
     tmux-bridge send "${pane_id}" "${message}" >/dev/null || die "send failed for ${label} after cache refresh"
   fi
 }
@@ -1469,29 +1611,10 @@ maybe_run_in_orchestrator_pane() {
   return 0
 }
 
-agent_ready_pattern() {
-  local label="$1"
-
-  case "${label}" in
-    "${CODEX_LABEL}")
-      printf '%s\n' 'OpenAI Codex|/model to change|/rename to rename your threads'
-      ;;
-    "${CC_LABEL}")
-      printf '%s\n' 'Claude Code|Welcome back|Claude Max|❯'
-      ;;
-    "${AMP_LABEL}")
-      printf '%s\n' 'Welcome to Amp|Ctrl\+O for help|\? for shortcuts'
-      ;;
-    *)
-      printf '%s\n' '.'
-      ;;
-  esac
-}
-
 wait_for_agent_ready() {
   local label="$1"
   local timeout="${2:-${AGENT_READY_TIMEOUT}}"
-  local pane_id pattern output waited=0
+  local pane_id pattern expected current output exit_code waited=0
 
   pane_id=$(resolve_target "${label}" 2>/dev/null || true)
   if [[ -z "${pane_id}" ]]; then
@@ -1500,14 +1623,29 @@ wait_for_agent_ready() {
   fi
   [[ -n "${pane_id}" ]] || die "no pane found with label '${label}'"
   pattern=$(agent_ready_pattern "${label}")
+  expected=$(agent_expected_command "${label}" 2>/dev/null || true)
 
   while true; do
-    output=$(tmux capture-pane -t "${pane_id}" -p -S -40 2>/dev/null || true)
-    if printf '%s\n' "${output}" | grep -Eq "${pattern}"; then
+    current=$(pane_current_command "${pane_id}")
+    output=$(pane_recent_output "${pane_id}")
+    exit_code=$(agent_exit_code_from_output "${output}")
+
+    if [[ -n "${exit_code}" ]]; then
+      die "${label} failed to start: agent exited with code ${exit_code}"
+    fi
+
+    if [[ -n "${expected}" ]]; then
+      if [[ "${current}" == "${expected}" ]] && printf '%s\n' "${output}" | grep -Eq "${pattern}"; then
+        return
+      fi
+    elif printf '%s\n' "${output}" | grep -Eq "${pattern}"; then
       return
     fi
 
     if (( waited >= timeout )); then
+      if [[ -n "${expected}" && -n "${current}" && "${current}" != "${expected}" ]]; then
+        die "timed out waiting for ${label} to become ready (expected ${expected}, pane current command is ${current})"
+      fi
       die "timed out waiting for ${label} to become ready"
     fi
 
@@ -1561,17 +1699,18 @@ start_council() {
       existing_workspace=$(council_workspace)
 
       if council_labels_ready && [[ "${existing_workspace}" == "${cwd}" ]]; then
-        cache_pane_ids
-        tmux select-window -t "${target}"
-        echo "selected existing council window: ${display_target}"
-        return
-      fi
-
-      if [[ -n "${existing_workspace}" && "${existing_workspace}" != "${cwd}" ]]; then
+        if council_agents_running; then
+          tmux select-window -t "${target}"
+          echo "selected existing council window: ${display_target}"
+          return
+        fi
+        echo "recreating unhealthy council window: ${display_target}" >&2
+      elif [[ -n "${existing_workspace}" && "${existing_workspace}" != "${cwd}" ]]; then
         echo "recreating council window for workspace change: ${existing_workspace} -> ${cwd}" >&2
       else
         echo "recreating invalid council window: ${display_target}" >&2
       fi
+
       tmux kill-window -t "${target}"
     fi
   fi
