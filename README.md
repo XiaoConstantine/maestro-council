@@ -21,7 +21,7 @@ dispatch may not match what this repo expects.
 
 Shout out to
 [`ShawnPana/smux`](https://github.com/ShawnPana/smux), the original
-upstream project that your fork builds on.
+upstream project that my fork builds on.
 
 ## Model
 
