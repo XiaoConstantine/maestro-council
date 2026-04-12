@@ -40,7 +40,7 @@ run multiple councils side by side in the same tmux session.
 By default the agent commands are:
 
 - `codex`
-- `claude` for `cc`
+- `claude --permission-mode bypassPermissions` for `cc`
 - `amp`
 
 Override them with environment variables:
@@ -70,6 +70,27 @@ Run the default end-to-end flow from any pane in the target workspace:
 council start
 council run "Design a new tmux-native council tool"
 ```
+
+By default, `council run` opens a dedicated orchestration pane beneath
+the pane you launched it from, keeps your original pane focused, and
+leaves the run pane open after completion so the full status log stays
+visible. Set `MAESTRO_COUNCIL_ORCHESTRATE_IN_PANE=0` for the old inline
+behavior.
+
+You can choose where that orchestration pane lives with
+`MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET`:
+
+- `current`: split the pane you launched `council run` from
+- `council`: add or reuse an orchestration pane inside the
+  `maestro-council` tmux window as a slim left rail, with `cc` and
+  `amp` on the top row and `codex` across the bottom on the right
+
+Adjust the pane height with
+`MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES=<lines>` for `current`, or the
+left column width with
+`MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH=<columns>` for `council`.
+Output color follows `MAESTRO_COUNCIL_COLOR=auto|always|never` and
+respects `NO_COLOR`.
 
 Or target a specific named instance:
 
