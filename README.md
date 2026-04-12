@@ -1,13 +1,27 @@
 # maestro-council
 
 `maestro-council` is a tmux-first council runner built on top of
-`tmux-bridge`. It starts a fixed council of `codex`, `cc` (Claude Code),
-and `amp`, then coordinates a planning phase and execution phase using
-tmux for control messages and shared files for artifacts.
+[`smux`](https://github.com/XiaoConstantine/smux), specifically the
+`XiaoConstantine/smux` fork and its `tmux-bridge` CLI. It starts a fixed
+council of `codex`, `cc` (Claude Code), and `amp`, then coordinates a
+planning phase and execution phase using tmux for control messages and
+shared files for artifacts.
 
 The repo is deliberately shell-first. The public entry point is
 `bin/council`, with `bin/council-round` available as a thin orchestration
 wrapper and `bin/maestro-council` kept as a compatibility alias.
+
+## Dependency
+
+`maestro-council` assumes the `smux` layout conventions and
+`tmux-bridge` behavior from
+[`XiaoConstantine/smux`](https://github.com/XiaoConstantine/smux). If
+you install a different `smux` variant, pane control and one-way message
+dispatch may not match what this repo expects.
+
+Shout out to
+[`ShawnPana/smux`](https://github.com/ShawnPana/smux), the original
+upstream project that your fork builds on.
 
 ## Model
 
@@ -180,8 +194,11 @@ The key outputs are:
 
 ## Install
 
-Install `smux` first. `maestro-council` depends on the tmux layout and
-`tmux-bridge` CLI that `smux` provides:
+Install `smux` first. This repo currently uses the
+[`XiaoConstantine/smux`](https://github.com/XiaoConstantine/smux) fork,
+which is based on
+[`ShawnPana/smux`](https://github.com/ShawnPana/smux). `maestro-council`
+depends on the tmux layout and `tmux-bridge` CLI that fork provides:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/XiaoConstantine/smux/main/install.sh | bash
@@ -213,3 +230,7 @@ It intentionally does not bind a full free-form `run` prompt by default,
 because quoting multi-line tasks through `command-prompt` gets brittle.
 Once the council window is up, run `council run "..."` or
 `maestro-council run "..."` from a pane in the target workspace.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
