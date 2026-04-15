@@ -1170,7 +1170,7 @@ agent_ready_pattern() {
       printf '%s\n' 'OpenAI Codex|/model to change|/rename to rename your threads'
       ;;
     "${CC_LABEL}")
-      printf '%s\n' 'Claude Code|Welcome back|Claude Max'
+      printf '%s\n' 'Claude Code|Welcome back|Claude Max|❯'
       ;;
     "${AMP_LABEL}")
       printf '%s\n' 'Welcome to Amp|Ctrl\+O for help|\? for shortcuts'
@@ -1183,6 +1183,53 @@ agent_ready_pattern() {
 
 agent_exit_code_from_output() {
   printf '%s\n' "$1" | sed -En 's/.*\[maestro-council\] agent exited with code ([0-9]+).*/\1/p' | head -n 1
+}
+
+agent_output_is_ready() {
+  local label="$1"
+  local output="$2"
+  local pattern
+
+  pattern=$(agent_ready_pattern "${label}")
+  printf '%s\n' "${output}" | grep -Eq "${pattern}"
+}
+
+command_is_shell() {
+  local current="${1##*/}"
+  local shell_bin="${SHELL:-/bin/zsh}"
+  local shell_name="${shell_bin##*/}"
+
+  case "${current}" in
+    sh|bash|zsh|fish|ksh|dash|ash|nu|tcsh|csh|login)
+      return 0
+      ;;
+  esac
+
+  [[ -n "${shell_name}" && "${current}" == "${shell_name}" ]]
+}
+
+agent_command_matches_current() {
+  local label="$1"
+  local current="${2##*/}"
+  local expected
+
+  [[ -n "${current}" ]] || return 1
+  expected=$(agent_expected_command "${label}" 2>/dev/null || true)
+
+  case "${label}" in
+    "${CODEX_LABEL}")
+      [[ "${current}" == "${expected}" || "${current}" == "${expected}"-* || "${current}" == "${expected}"_* ]]
+      ;;
+    "${CC_LABEL}")
+      [[ "${current}" == "${expected}" || "${current}" == "${expected}"-* || "${current}" =~ ^[0-9]+([.][0-9]+)+$ ]]
+      ;;
+    "${AMP_LABEL}")
+      [[ "${current}" == "${expected}" || "${current}" == "bun" ]]
+      ;;
+    *)
+      [[ "${current}" == "${expected}" ]]
+      ;;
+  esac
 }
 
 agent_health_issue() {
@@ -1204,16 +1251,23 @@ agent_health_issue() {
     return 0
   fi
 
-  if [[ -n "${expected}" && "${current}" != "${expected}" ]]; then
-    if [[ -n "${current}" ]]; then
-      printf '%s is not running (expected %s, pane current command is %s)' "${label}" "${expected}" "${current}"
-    else
-      printf '%s is not running (expected %s)' "${label}" "${expected}"
-    fi
-    return 0
+  if agent_output_is_ready "${label}" "${output}" || agent_command_matches_current "${label}" "${current}"; then
+    return 1
   fi
 
-  return 1
+  if [[ -n "${current}" ]] && ! command_is_shell "${current}"; then
+    return 1
+  fi
+
+  if [[ -n "${expected}" && -n "${current}" ]]; then
+    printf '%s is not running (expected %s, pane current command is %s)' "${label}" "${expected}" "${current}"
+  elif [[ -n "${expected}" ]]; then
+    printf '%s is not running (expected %s)' "${label}" "${expected}"
+  else
+    printf '%s is not running' "${label}"
+  fi
+
+  return 0
 }
 
 resolve_live_target() {
@@ -1482,7 +1536,7 @@ launch_agent_window() {
   local cmd="$4"
   local shell_bin="${SHELL:-/bin/zsh}"
 
-  tmux new-window -t "${target_session}" -n "${window_name}" -c "${cwd}" \
+  tmux new-window -P -F '#{pane_id}' -t "${target_session}" -n "${window_name}" -c "${cwd}" \
     env MAESTRO_COUNCIL_AGENT_CMD="${cmd}" MAESTRO_COUNCIL_AGENT_SHELL="${shell_bin}" \
     "${shell_bin}" -lc "$(agent_runner_script)"
 }
@@ -1494,7 +1548,7 @@ split_agent_pane() {
   local cmd="$4"
   local shell_bin="${SHELL:-/bin/zsh}"
 
-  tmux split-window "${direction}" -t "${target}" -c "${cwd}" \
+  tmux split-window -P -F '#{pane_id}' "${direction}" -t "${target}" -c "${cwd}" \
     env MAESTRO_COUNCIL_AGENT_CMD="${cmd}" MAESTRO_COUNCIL_AGENT_SHELL="${shell_bin}" \
     "${shell_bin}" -lc "$(agent_runner_script)"
 }
@@ -1562,7 +1616,7 @@ launch_orchestrator_pane_in_council_window() {
 }
 
 maybe_run_in_orchestrator_pane() {
-  local command current_window cwd pane_id pane_target
+  local command current_window cwd display_target pane_id pane_target
 
   case "${ORCHESTRATE_IN_PANE}" in
     1|true|TRUE|yes|YES|on|ON) ;;
@@ -1595,8 +1649,10 @@ maybe_run_in_orchestrator_pane() {
     pane_id=$(launch_orchestrator_pane "${cwd}" "${command}") || return 1
     print_heading "council run launched"
     print_field "pane" "${pane_id}"
+    print_field "instance" "${COUNCIL_INSTANCE}"
     print_field "location" "current window"
-    print_note_line "follow the live status there; the pane stays open after the run completes"
+    print_field "show pane" "tmux select-pane -t ${pane_id}"
+    print_note_line "your current pane stays focused; the run pane stays open after completion"
     return 0
   fi
 
@@ -1604,17 +1660,20 @@ maybe_run_in_orchestrator_pane() {
   start_council >/dev/null
   command=$(quote_command_args env MAESTRO_COUNCIL_IN_ORCHESTRATOR_PANE=1 MAESTRO_COUNCIL_INSTANCE="${COUNCIL_INSTANCE}" "${SCRIPT_DIR}/council" "$@")
   pane_id=$(launch_orchestrator_pane_in_council_window "${cwd}" "${command}") || return 1
+  display_target=$(window_display_target)
   print_heading "council run launched"
   print_field "pane" "${pane_id}"
-  print_field "location" "$(window_display_target)"
-  print_note_line "follow the live status in the council window; the pane stays open after the run completes"
+  print_field "instance" "${COUNCIL_INSTANCE}"
+  print_field "location" "${display_target}"
+  print_field "switch" "tmux select-window -t ${display_target}"
+  print_note_line "your current pane stays focused; the council window stays open after the run completes"
   return 0
 }
 
 wait_for_agent_ready() {
   local label="$1"
   local timeout="${2:-${AGENT_READY_TIMEOUT}}"
-  local pane_id pattern expected current output exit_code waited=0
+  local pane_id expected current output exit_code waited=0
 
   pane_id=$(resolve_target "${label}" 2>/dev/null || true)
   if [[ -z "${pane_id}" ]]; then
@@ -1622,7 +1681,6 @@ wait_for_agent_ready() {
     pane_id=$(resolve_target "${label}" 2>/dev/null || true)
   fi
   [[ -n "${pane_id}" ]] || die "no pane found with label '${label}'"
-  pattern=$(agent_ready_pattern "${label}")
   expected=$(agent_expected_command "${label}" 2>/dev/null || true)
 
   while true; do
@@ -1634,16 +1692,12 @@ wait_for_agent_ready() {
       die "${label} failed to start: agent exited with code ${exit_code}"
     fi
 
-    if [[ -n "${expected}" ]]; then
-      if [[ "${current}" == "${expected}" ]] && printf '%s\n' "${output}" | grep -Eq "${pattern}"; then
-        return
-      fi
-    elif printf '%s\n' "${output}" | grep -Eq "${pattern}"; then
+    if agent_output_is_ready "${label}" "${output}"; then
       return
     fi
 
     if (( waited >= timeout )); then
-      if [[ -n "${expected}" && -n "${current}" && "${current}" != "${expected}" ]]; then
+      if [[ -n "${expected}" && -n "${current}" ]] && ! agent_command_matches_current "${label}" "${current}"; then
         die "timed out waiting for ${label} to become ready (expected ${expected}, pane current command is ${current})"
       fi
       die "timed out waiting for ${label} to become ready"
@@ -1682,7 +1736,7 @@ start_council() {
   local force_recreate="${1:-}"
   require_tmux
 
-  local session_target cwd target display_target
+  local session_target cwd target display_target codex_pane cc_pane amp_pane
   session_target=$(current_session_target)
   cwd=$(current_path)
   set_council_paths "${cwd}"
@@ -1715,26 +1769,21 @@ start_council() {
     fi
   fi
 
-  launch_agent_window "${session_target}" "${WINDOW_NAME}" "${cwd}" "${CODEX_CMD}"
-  split_agent_pane "${target}" -h "${cwd}" "${CC_CMD}"
-  split_agent_pane "${target}" -v "${cwd}" "${AMP_CMD}"
+  codex_pane=$(launch_agent_window "${session_target}" "${WINDOW_NAME}" "${cwd}" "${CODEX_CMD}")
+  cc_pane=$(split_agent_pane "${target}" -h "${cwd}" "${CC_CMD}")
+  amp_pane=$(split_agent_pane "${target}" -v "${cwd}" "${AMP_CMD}")
   tmux select-layout -t "${target}" tiled
 
-  local panes=()
-  local pane_id
-  while IFS= read -r pane_id; do
-    panes+=("${pane_id}")
-  done < <(tmux list-panes -t "${target}" -F '#{pane_id}')
-  [[ "${#panes[@]}" -eq 3 ]] || die "expected 3 panes, got ${#panes[@]}"
+  [[ -n "${codex_pane}" && -n "${cc_pane}" && -n "${amp_pane}" ]] || die "failed to capture council pane ids"
 
-  tmux-bridge name "${panes[0]}" "${CODEX_LABEL}"
-  tmux-bridge name "${panes[1]}" "${CC_LABEL}"
-  tmux-bridge name "${panes[2]}" "${AMP_LABEL}"
+  tmux-bridge name "${codex_pane}" "${CODEX_LABEL}"
+  tmux-bridge name "${cc_pane}" "${CC_LABEL}"
+  tmux-bridge name "${amp_pane}" "${AMP_LABEL}"
   tmux set-option -w -t "${target}" @maestro_council_workspace "${cwd}"
   cache_pane_ids
 
   tmux select-window -t "${target}"
-  tmux select-pane -t "${panes[0]}"
+  tmux select-pane -t "${codex_pane}"
   wait_for_agents_ready
 
   print_heading "council started"
@@ -1746,14 +1795,56 @@ start_council() {
   print_path_field "workspace" "${cwd}"
 }
 
+print_status_rows() {
+  local window_match="$1"
+  local label_codex="$2"
+  local label_cc="$3"
+  local label_amp="$4"
+  local label_orchestrator="${5:-}"
+
+  tmux list-panes -a -F '#{pane_id}	#{session_name}:#{window_index}	#{window_name}	#{pane_width}x#{pane_height}	#{pane_current_command}	#{@name}	#{@maestro_council_workspace}' \
+    | awk -F '	' \
+      -v window_match="${window_match}" \
+      -v label_codex="${label_codex}" \
+      -v label_cc="${label_cc}" \
+      -v label_amp="${label_amp}" \
+      -v label_orchestrator="${label_orchestrator}" '
+        function matches_window(name) {
+          return name == window_match || index(name, window_match "-") == 1
+        }
+
+        function matches_label(label) {
+          if (label == label_codex || label == label_cc || label == label_amp) {
+            return 1
+          }
+          if (label_orchestrator != "" && label == label_orchestrator) {
+            return 1
+          }
+          return 0
+        }
+
+        BEGIN {
+          printed = 0
+        }
+
+        matches_window($3) || matches_label($6) {
+          if (printed == 0) {
+            printf "%-8s %-14s %-26s %-10s %-22s %-20s %s\n", "TARGET", "SESSION:WIN", "WINDOW", "SIZE", "PROCESS", "LABEL", "WORKSPACE"
+          }
+          printf "%-8s %-14s %-26s %-10s %-22s %-20s %s\n", $1, $2, $3, $4, $5, ($6 == "" ? "-" : $6), $7
+          printed = 1
+        }
+      '
+}
+
 status_council() {
   require_tmux
   if [[ "${1:-}" == "--all" ]]; then
-    tmux-bridge list | grep -F -e "${BASE_WINDOW_NAME}" -e "${BASE_CODEX_LABEL}" -e "${BASE_CC_LABEL}" -e "${BASE_AMP_LABEL}" || true
+    print_status_rows "${BASE_WINDOW_NAME}" "${BASE_CODEX_LABEL}" "${BASE_CC_LABEL}" "${BASE_AMP_LABEL}" "${BASE_ORCHESTRATOR_LABEL}"
     return
   fi
 
-  tmux-bridge list | grep -F -e "${CODEX_LABEL}" -e "${CC_LABEL}" -e "${AMP_LABEL}" -e "${WINDOW_NAME}" || true
+  print_status_rows "${WINDOW_NAME}" "${CODEX_LABEL}" "${CC_LABEL}" "${AMP_LABEL}" "${ORCHESTRATOR_LABEL}"
 }
 
 run_council() {
