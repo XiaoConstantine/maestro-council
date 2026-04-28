@@ -1159,7 +1159,11 @@ pane_current_command() {
 }
 
 pane_recent_output() {
-  tmux capture-pane -t "$1" -p -S -80 2>/dev/null || true
+  tmux capture-pane -J -t "$1" -p -S -80 2>/dev/null || true
+}
+
+pane_current_path_for_id() {
+  tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null || true
 }
 
 agent_ready_pattern() {
@@ -1243,15 +1247,21 @@ agent_health_issue() {
   exit_code=$(agent_exit_code_from_output "${output}")
 
   if [[ -n "${exit_code}" ]]; then
-    if [[ -n "${current}" ]]; then
-      printf '%s failed to start or exited with code %s (pane current command: %s)' "${label}" "${exit_code}" "${current}"
-    else
-      printf '%s failed to start or exited with code %s' "${label}" "${exit_code}"
+    if [[ -z "${current}" ]] || command_is_shell "${current}"; then
+      if [[ -n "${current}" ]]; then
+        printf '%s failed to start or exited with code %s (pane current command: %s)' "${label}" "${exit_code}" "${current}"
+      else
+        printf '%s failed to start or exited with code %s' "${label}" "${exit_code}"
+      fi
+      return 0
     fi
-    return 0
   fi
 
-  if agent_output_is_ready "${label}" "${output}" || agent_command_matches_current "${label}" "${current}"; then
+  if agent_command_matches_current "${label}" "${current}"; then
+    return 1
+  fi
+
+  if agent_output_is_ready "${label}" "${output}"; then
     return 1
   fi
 
@@ -1270,6 +1280,40 @@ agent_health_issue() {
   return 0
 }
 
+agent_restart_workspace() {
+  local pane_id="$1"
+  local workspace="${RUN_WORKSPACE:-}"
+
+  if [[ -z "${workspace}" ]]; then
+    workspace=$(council_workspace)
+  fi
+  if [[ -z "${workspace}" ]]; then
+    workspace=$(pane_current_path_for_id "${pane_id}")
+  fi
+  if [[ -z "${workspace}" ]]; then
+    workspace=$(current_path)
+  fi
+
+  printf '%s\n' "${workspace}"
+}
+
+restart_agent_pane() {
+  local label="$1"
+  local pane_id="$2"
+  local cmd workspace shell_bin="${SHELL:-/bin/zsh}"
+
+  cmd=$(agent_command_string "${label}") || return 1
+  workspace=$(agent_restart_workspace "${pane_id}")
+
+  printf 'restarting inactive %s in pane %s\n' "${label}" "${pane_id}" >&2
+  tmux respawn-pane -k -t "${pane_id}" -c "${workspace}" \
+    env MAESTRO_COUNCIL_AGENT_CMD="${cmd}" MAESTRO_COUNCIL_AGENT_SHELL="${shell_bin}" \
+    "${shell_bin}" -lc "$(agent_runner_script)"
+  tmux clear-history -t "${pane_id}" >/dev/null 2>&1 || true
+  tmux-bridge name "${pane_id}" "${label}" >/dev/null 2>&1 || true
+  wait_for_agent_ready "${label}"
+}
+
 resolve_live_target() {
   local label="$1"
   local pane_id issue
@@ -1277,16 +1321,24 @@ resolve_live_target() {
   pane_id=$(resolve_target "${label}") || die "cannot resolve target: ${label}"
   issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
   if [[ -n "${issue}" ]]; then
+    restart_agent_pane "${label}" "${pane_id}"
+    issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
+  fi
+  if [[ -n "${issue}" ]]; then
     cache_pane_ids
     pane_id=$(resolve_target "${label}") || die "cannot resolve target after refresh: ${label}"
     issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
+    if [[ -n "${issue}" ]]; then
+      restart_agent_pane "${label}" "${pane_id}"
+      issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
+    fi
     [[ -z "${issue}" ]] || die "${issue}"
   fi
 
   printf '%s\n' "${pane_id}"
 }
 
-council_agents_running() {
+ensure_council_agents_running() {
   local label pane_id issue
 
   cache_pane_ids
@@ -1295,7 +1347,7 @@ council_agents_running() {
     issue=$(agent_health_issue "${label}" "${pane_id}" 2>/dev/null || true)
     if [[ -n "${issue}" ]]; then
       printf '%s\n' "${issue}" >&2
-      return 1
+      restart_agent_pane "${label}" "${pane_id}"
     fi
   done
 
@@ -1673,7 +1725,7 @@ maybe_run_in_orchestrator_pane() {
 wait_for_agent_ready() {
   local label="$1"
   local timeout="${2:-${AGENT_READY_TIMEOUT}}"
-  local pane_id expected current output exit_code waited=0
+  local pane_id expected current output exit_code exit_marker_active waited=0
 
   pane_id=$(resolve_target "${label}" 2>/dev/null || true)
   if [[ -z "${pane_id}" ]]; then
@@ -1687,16 +1739,28 @@ wait_for_agent_ready() {
     current=$(pane_current_command "${pane_id}")
     output=$(pane_recent_output "${pane_id}")
     exit_code=$(agent_exit_code_from_output "${output}")
+    exit_marker_active=0
 
     if [[ -n "${exit_code}" ]]; then
-      die "${label} failed to start: agent exited with code ${exit_code}"
+      if [[ -z "${current}" ]] || command_is_shell "${current}"; then
+        exit_marker_active=1
+        if (( waited > 1 )); then
+          die "${label} failed to start: agent exited with code ${exit_code}"
+        fi
+      fi
     fi
 
-    if agent_output_is_ready "${label}" "${output}"; then
+    if (( exit_marker_active == 0 )) && agent_output_is_ready "${label}" "${output}"; then
       return
     fi
 
     if (( waited >= timeout )); then
+      if agent_command_matches_current "${label}" "${current}"; then
+        return
+      fi
+      if [[ -n "${current}" ]] && ! command_is_shell "${current}"; then
+        return
+      fi
       if [[ -n "${expected}" && -n "${current}" ]] && ! agent_command_matches_current "${label}" "${current}"; then
         die "timed out waiting for ${label} to become ready (expected ${expected}, pane current command is ${current})"
       fi
@@ -1753,12 +1817,10 @@ start_council() {
       existing_workspace=$(council_workspace)
 
       if council_labels_ready && [[ "${existing_workspace}" == "${cwd}" ]]; then
-        if council_agents_running; then
-          tmux select-window -t "${target}"
-          echo "selected existing council window: ${display_target}"
-          return
-        fi
-        echo "recreating unhealthy council window: ${display_target}" >&2
+        ensure_council_agents_running
+        tmux select-window -t "${target}"
+        echo "selected existing council window: ${display_target}"
+        return
       elif [[ -n "${existing_workspace}" && "${existing_workspace}" != "${cwd}" ]]; then
         echo "recreating council window for workspace change: ${existing_workspace} -> ${cwd}" >&2
       else
@@ -1915,7 +1977,7 @@ exec_council() {
   require_workspace_match "${RUN_WORKSPACE}"
   check_workspace_snapshot || die "workspace drift detected since planning; inspect ${snapshot_path} or re-run council plan"
 
-  start_council --force >/dev/null
+  start_council >/dev/null
   write_run_target "complete"
   setup_current_run_tracking
   install_run_cleanup_traps

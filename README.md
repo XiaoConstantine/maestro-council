@@ -147,6 +147,9 @@ It then stops and records:
 `council exec` loads an existing run, verifies `plan.final.md` exists,
 checks `workspace.snapshot.txt` for drift, upgrades `target.txt` to
 `complete`, and runs only the execution stages.
+It reuses the existing council window when possible; if an agent pane has
+dropped back to a shell, that pane is restarted in place instead of
+recreating the whole council.
 
 Each run records the active stage in `stage.txt`, the coarse phase in
 `phase.txt`, and the intended stop boundary in `target.txt`. If a run is
