@@ -33,6 +33,10 @@ Installed:
 
 Add this line to ~/.smux/tmux.conf or ~/.config/tmux/tmux.conf:
   source-file ~/.smux/maestro-council.conf
+
+Optional next steps:
+  council init-config --global
+  council doctor
 EOF
 
 if [[ ":${PATH}:" != *":${SMUX_BIN}:"* ]]; then

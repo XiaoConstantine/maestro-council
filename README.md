@@ -39,6 +39,32 @@ instruction files, and they write their actual artifacts to disk.
 
 Runtime defaults live in [council.conf](council.conf).
 
+Configuration is layered so local projects can override personal
+defaults without editing this repo. Config files are shell files, so use
+normal `MAESTRO_COUNCIL_*=...` assignments.
+
+1. `~/.config/maestro-council/council.conf`
+2. `~/.maestro-council.conf`
+3. `.maestro-council.conf` in the current git root
+4. `.maestro-council.conf` in the current directory, when different
+5. `MAESTRO_COUNCIL_CONFIG=<path>`
+6. environment variables
+7. command-line flags such as `--instance`
+
+Generate a starter config with:
+
+```bash
+council init-config          # project config
+council init-config --global # user config
+```
+
+Inspect the exact effective config and preflight the local setup with:
+
+```bash
+council config
+council doctor
+```
+
 By default, `council` targets the `default` instance. Named instances
 append `-<instance>` to the base window and pane labels, which lets you
 run multiple councils side by side in the same tmux session.
@@ -83,6 +109,14 @@ Run the default end-to-end flow from any pane in the target workspace:
 ```bash
 council start
 council run "Design a new tmux-native council tool"
+```
+
+For longer or multi-line tasks, avoid shell quoting by reading the task
+from a file or stdin:
+
+```bash
+council run --task-file task.md
+pbpaste | council run --task-file -
 ```
 
 By default, `council run` opens a dedicated orchestration pane beneath
@@ -163,6 +197,15 @@ council resume <run-id>
 `council continue <run-id>` is an alias for the same command. Run it
 from the same workspace the council run targets.
 
+To inspect existing work without searching the artifact directory by
+hand:
+
+```bash
+council runs
+council show <run-id>
+council status --all
+```
+
 `council run` without `--instance` allocates a fresh instance if the
 default council window already exists. Pass `--instance <name>` or set
 `MAESTRO_COUNCIL_INSTANCE` to pin and reuse a specific instance.
@@ -222,6 +265,24 @@ This will:
 - write `~/.smux/maestro-council.conf`
 - print the `source-file` line to add to your tmux config
 - remind you to put `~/.smux/bin` on your shell `PATH` if needed
+
+### mycli Integration
+
+`maestro-council` can also be managed through
+[`mycli`](https://github.com/XiaoConstantine/mycli)'s first-class council
+command:
+
+```bash
+mycli council install
+mycli council install-agents --config config.yaml
+mycli council doctor
+mycli council start
+mycli council run --config config.yaml --task-file task.md
+```
+
+The `mycli-*` wrappers in this repo are compatibility shims for mycli's
+extension-style executable layout, but the intended user flow is
+`mycli council ...`.
 
 ## tmux Binding
 

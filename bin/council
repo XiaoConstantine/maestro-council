@@ -22,34 +22,152 @@ resolve_script_path() {
 SCRIPT_DIR=$(resolve_script_path "${BASH_SOURCE[0]}")
 REPO_ROOT=$(cd -P -- "${SCRIPT_DIR}/.." && pwd)
 
-if [[ -f "${REPO_ROOT}/council.conf" ]]; then
-  # shellcheck disable=SC1091
-  source "${REPO_ROOT}/council.conf"
-fi
+CONFIG_SOURCES=()
+CONFIG_VARS=(
+  MAESTRO_COUNCIL_WINDOW
+  MAESTRO_COUNCIL_CODEX_LABEL
+  MAESTRO_COUNCIL_CC_LABEL
+  MAESTRO_COUNCIL_AMP_LABEL
+  MAESTRO_COUNCIL_ORCHESTRATOR_LABEL
+  MAESTRO_COUNCIL_CODEX_CMD
+  MAESTRO_COUNCIL_CC_CMD
+  MAESTRO_COUNCIL_AMP_CMD
+  MAESTRO_COUNCIL_HOME
+  MAESTRO_COUNCIL_TIMEOUT
+  MAESTRO_COUNCIL_POLL_INTERVAL
+  MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS
+  MAESTRO_COUNCIL_AGENT_READY_TIMEOUT
+  MAESTRO_COUNCIL_ORCHESTRATE_IN_PANE
+  MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES
+  MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET
+  MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH
+  MAESTRO_COUNCIL_COLOR
+  MAESTRO_COUNCIL_INSTANCE
+)
 
-BASE_WINDOW_NAME="${MAESTRO_COUNCIL_WINDOW:-maestro-council}"
-BASE_CODEX_LABEL="${MAESTRO_COUNCIL_CODEX_LABEL:-council-codex}"
-BASE_CC_LABEL="${MAESTRO_COUNCIL_CC_LABEL:-council-cc}"
-BASE_AMP_LABEL="${MAESTRO_COUNCIL_AMP_LABEL:-council-amp}"
-BASE_ORCHESTRATOR_LABEL="${MAESTRO_COUNCIL_ORCHESTRATOR_LABEL:-council-orchestrator}"
+config_var_is_set() {
+  local var="$1"
+  eval '[[ "${'"${var}"'+x}" == "x" ]]'
+}
 
-CODEX_CMD="${MAESTRO_COUNCIL_CODEX_CMD:-codex}"
-CC_CMD="${MAESTRO_COUNCIL_CC_CMD:-claude}"
-AMP_CMD="${MAESTRO_COUNCIL_AMP_CMD:-amp}"
+config_var_value() {
+  local var="$1"
+  eval 'printf "%s" "${'"${var}"':-}"'
+}
 
-COUNCIL_HOME_OVERRIDE="${MAESTRO_COUNCIL_HOME:-}"
+capture_env_config_overrides() {
+  local var value
+
+  for var in "${CONFIG_VARS[@]}"; do
+    if config_var_is_set "${var}"; then
+      value=$(config_var_value "${var}")
+      printf -v "__MC_ENV_SET_${var}" '%s' "1"
+      printf -v "__MC_ENV_VALUE_${var}" '%s' "${value}"
+    fi
+  done
+}
+
+restore_env_config_overrides() {
+  local var value
+
+  for var in "${CONFIG_VARS[@]}"; do
+    if [[ "$(config_var_value "__MC_ENV_SET_${var}")" == "1" ]]; then
+      value=$(config_var_value "__MC_ENV_VALUE_${var}")
+      printf -v "${var}" '%s' "${value}"
+    fi
+  done
+}
+
+source_config_file() {
+  local path="$1"
+
+  [[ -f "${path}" ]] || return 0
+  # shellcheck disable=SC1090
+  source "${path}"
+  CONFIG_SOURCES+=("${path}")
+}
+
+load_council_config() {
+  local cwd git_root root_config cwd_config explicit_config
+
+  capture_env_config_overrides
+
+  if [[ -n "${HOME:-}" ]]; then
+    source_config_file "${HOME}/.config/maestro-council/council.conf"
+    source_config_file "${HOME}/.maestro-council.conf"
+  fi
+
+  cwd="${PWD:-.}"
+  git_root=""
+  if command -v git >/dev/null 2>&1; then
+    git_root=$(git -C "${cwd}" rev-parse --show-toplevel 2>/dev/null || true)
+  fi
+
+  if [[ -n "${git_root}" ]]; then
+    root_config="${git_root}/.maestro-council.conf"
+    source_config_file "${root_config}"
+  else
+    root_config=""
+  fi
+
+  cwd_config="${cwd}/.maestro-council.conf"
+  if [[ "${cwd_config}" != "${root_config}" ]]; then
+    source_config_file "${cwd_config}"
+  fi
+
+  explicit_config="${MAESTRO_COUNCIL_CONFIG:-}"
+  if [[ -n "${explicit_config}" ]]; then
+    source_config_file "${explicit_config}"
+  fi
+
+  source_config_file "${REPO_ROOT}/council.conf"
+  restore_env_config_overrides
+
+  : "${MAESTRO_COUNCIL_WINDOW:=maestro-council}"
+  : "${MAESTRO_COUNCIL_CODEX_LABEL:=council-codex}"
+  : "${MAESTRO_COUNCIL_CC_LABEL:=council-cc}"
+  : "${MAESTRO_COUNCIL_AMP_LABEL:=council-amp}"
+  : "${MAESTRO_COUNCIL_ORCHESTRATOR_LABEL:=council-orchestrator}"
+  : "${MAESTRO_COUNCIL_CODEX_CMD:=codex}"
+  : "${MAESTRO_COUNCIL_CC_CMD:=claude --permission-mode bypassPermissions}"
+  : "${MAESTRO_COUNCIL_AMP_CMD:=amp}"
+  : "${MAESTRO_COUNCIL_HOME:=}"
+  : "${MAESTRO_COUNCIL_TIMEOUT:=900}"
+  : "${MAESTRO_COUNCIL_POLL_INTERVAL:=0.5}"
+  : "${MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS:=2}"
+  : "${MAESTRO_COUNCIL_AGENT_READY_TIMEOUT:=60}"
+  : "${MAESTRO_COUNCIL_ORCHESTRATE_IN_PANE:=1}"
+  : "${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES:=14}"
+  : "${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET:=council}"
+  : "${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH:=20}"
+  : "${MAESTRO_COUNCIL_COLOR:=always}"
+}
+
+load_council_config
+
+BASE_WINDOW_NAME="${MAESTRO_COUNCIL_WINDOW}"
+BASE_CODEX_LABEL="${MAESTRO_COUNCIL_CODEX_LABEL}"
+BASE_CC_LABEL="${MAESTRO_COUNCIL_CC_LABEL}"
+BASE_AMP_LABEL="${MAESTRO_COUNCIL_AMP_LABEL}"
+BASE_ORCHESTRATOR_LABEL="${MAESTRO_COUNCIL_ORCHESTRATOR_LABEL}"
+
+CODEX_CMD="${MAESTRO_COUNCIL_CODEX_CMD}"
+CC_CMD="${MAESTRO_COUNCIL_CC_CMD}"
+AMP_CMD="${MAESTRO_COUNCIL_AMP_CMD}"
+
+COUNCIL_HOME_OVERRIDE="${MAESTRO_COUNCIL_HOME}"
 COUNCIL_HOME=""
 RUNS_DIR=""
 TMP_DIR=""
-DEFAULT_TIMEOUT="${MAESTRO_COUNCIL_TIMEOUT:-900}"
-POLL_INTERVAL="${MAESTRO_COUNCIL_POLL_INTERVAL:-0.5}"
-MAX_REVIEW_ROUNDS="${MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS:-2}"
-AGENT_READY_TIMEOUT="${MAESTRO_COUNCIL_AGENT_READY_TIMEOUT:-20}"
-ORCHESTRATE_IN_PANE="${MAESTRO_COUNCIL_ORCHESTRATE_IN_PANE:-1}"
-ORCHESTRATOR_PANE_LINES="${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES:-14}"
-ORCHESTRATOR_PANE_TARGET="${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET:-current}"
-ORCHESTRATOR_PANE_WIDTH="${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH:-20}"
-OUTPUT_COLOR_MODE="${MAESTRO_COUNCIL_COLOR:-auto}"
+DEFAULT_TIMEOUT="${MAESTRO_COUNCIL_TIMEOUT}"
+POLL_INTERVAL="${MAESTRO_COUNCIL_POLL_INTERVAL}"
+MAX_REVIEW_ROUNDS="${MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS}"
+AGENT_READY_TIMEOUT="${MAESTRO_COUNCIL_AGENT_READY_TIMEOUT}"
+ORCHESTRATE_IN_PANE="${MAESTRO_COUNCIL_ORCHESTRATE_IN_PANE}"
+ORCHESTRATOR_PANE_LINES="${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES}"
+ORCHESTRATOR_PANE_TARGET="${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET}"
+ORCHESTRATOR_PANE_WIDTH="${MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH}"
+OUTPUT_COLOR_MODE="${MAESTRO_COUNCIL_COLOR}"
 
 CURRENT_RUN_DIR=""
 CURRENT_RUN_ID=""
@@ -181,6 +299,41 @@ print_review_item() {
   printf '  - %b%s%b (%b)\n' "${STYLE_PATH}" "${path}" "${STYLE_RESET}" "${formatted_verdict}"
 }
 
+print_ok_line() {
+  printf '%bOK%b %s\n' "${STYLE_SUCCESS}" "${STYLE_RESET}" "$1"
+}
+
+print_warn_line() {
+  printf '%bWARN%b %s\n' "${STYLE_WARN}" "${STYLE_RESET}" "$1"
+}
+
+print_fail_line() {
+  printf '%bFAIL%b %s\n' "${STYLE_ERROR}" "${STYLE_RESET}" "$1"
+}
+
+print_config_sources() {
+  local source
+
+  printf '%bconfig files:%b\n' "${STYLE_KEY}" "${STYLE_RESET}"
+  if (( ${#CONFIG_SOURCES[@]} == 0 )); then
+    printf '  none\n'
+    return
+  fi
+
+  for source in "${CONFIG_SOURCES[@]}"; do
+    printf '  %b%s%b\n' "${STYLE_PATH}" "${source}" "${STYLE_RESET}"
+  done
+}
+
+print_config_value() {
+  local name="$1"
+  local value
+
+  value=$(config_var_value "${name}")
+  [[ -n "${value}" ]] || value="<unset>"
+  printf '  %-42s %s\n' "${name}" "${value}"
+}
+
 die() {
   CURRENT_EXIT_REASON="failed"
   printf '%berror:%b %s\n' "${STYLE_ERROR}" "${STYLE_RESET}" "$*" >&2
@@ -268,6 +421,28 @@ read_file_contents() {
   local path="$1"
   [[ -f "${path}" ]] || die "missing file: ${path}"
   perl -0ne 'print' "${path}"
+}
+
+read_optional_file() {
+  local path="$1"
+  local fallback="${2:-}"
+
+  if [[ -f "${path}" ]]; then
+    perl -0ne 'print' "${path}"
+  else
+    printf '%s' "${fallback}"
+  fi
+}
+
+read_task_input() {
+  local path="$1"
+
+  if [[ "${path}" == "-" ]]; then
+    perl -0ne 'print'
+    return
+  fi
+
+  read_file_contents "${path}"
 }
 
 set_run_context() {
@@ -964,9 +1139,13 @@ print_run_summary() {
 
   if [[ -s "${RUN_IMPL_DIR}/codex.md" ]]; then
     print_path_field "implementation note" "${RUN_IMPL_DIR}/codex.md"
-    printf '%breviews:%b\n' "${STYLE_KEY}" "${STYLE_RESET}"
-    print_review_item "${RUN_CC_REVIEW_PATH}" "${RUN_CC_VERDICT:-UNKNOWN}"
-    print_review_item "${RUN_AMP_REVIEW_PATH}" "${RUN_AMP_VERDICT:-UNKNOWN}"
+    if [[ -n "${RUN_CC_REVIEW_PATH}" && -n "${RUN_AMP_REVIEW_PATH}" ]]; then
+      printf '%breviews:%b\n' "${STYLE_KEY}" "${STYLE_RESET}"
+      print_review_item "${RUN_CC_REVIEW_PATH}" "${RUN_CC_VERDICT:-UNKNOWN}"
+      print_review_item "${RUN_AMP_REVIEW_PATH}" "${RUN_AMP_VERDICT:-UNKNOWN}"
+    else
+      print_field "reviews" "pending"
+    fi
   elif [[ "${target}" == "plan" && "${stage}" == "complete" ]]; then
     print_field "next action" "council exec ${RUN_ID}"
   fi
@@ -1863,8 +2042,10 @@ print_status_rows() {
   local label_cc="$3"
   local label_amp="$4"
   local label_orchestrator="${5:-}"
+  local rows
 
-  tmux list-panes -a -F '#{pane_id}	#{session_name}:#{window_index}	#{window_name}	#{pane_width}x#{pane_height}	#{pane_current_command}	#{@name}	#{@maestro_council_workspace}' \
+  rows=$(
+    tmux list-panes -a -F '#{pane_id}	#{session_name}:#{window_index}	#{window_name}	#{pane_width}x#{pane_height}	#{pane_current_command}	#{@name}	#{@maestro_council_workspace}' \
     | awk -F '	' \
       -v window_match="${window_match}" \
       -v label_codex="${label_codex}" \
@@ -1897,6 +2078,14 @@ print_status_rows() {
           printed = 1
         }
       '
+  )
+
+  if [[ -n "${rows}" ]]; then
+    printf '%s\n' "${rows}"
+  else
+    print_note_line "no matching council panes found"
+    print_note_line "start one with: council start"
+  fi
 }
 
 status_council() {
@@ -1907,6 +2096,296 @@ status_council() {
   fi
 
   print_status_rows "${WINDOW_NAME}" "${CODEX_LABEL}" "${CC_LABEL}" "${AMP_LABEL}" "${ORCHESTRATOR_LABEL}"
+}
+
+config_council() {
+  set_council_paths "${PWD}"
+
+  print_heading "council config"
+  print_config_sources
+  print_path_field "resolved council home" "${COUNCIL_HOME}"
+  printf '%bsettings:%b\n' "${STYLE_KEY}" "${STYLE_RESET}"
+
+  local var
+  for var in "${CONFIG_VARS[@]}"; do
+    print_config_value "${var}"
+  done
+}
+
+doctor_check_bin() {
+  local bin="$1"
+
+  if command -v "${bin}" >/dev/null 2>&1; then
+    print_ok_line "${bin}: $(command -v "${bin}")"
+    return 0
+  fi
+
+  print_fail_line "${bin}: not found on PATH"
+  return 1
+}
+
+doctor_check_integer() {
+  local name="$1"
+  local value="$2"
+
+  if [[ "${value}" =~ ^[0-9]+$ ]]; then
+    print_ok_line "${name}: ${value}"
+    return 0
+  fi
+
+  print_fail_line "${name}: expected an integer, got '${value}'"
+  return 1
+}
+
+doctor_check_number() {
+  local name="$1"
+  local value="$2"
+
+  if [[ "${value}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    print_ok_line "${name}: ${value}"
+    return 0
+  fi
+
+  print_fail_line "${name}: expected a number, got '${value}'"
+  return 1
+}
+
+doctor_check_agent_command() {
+  local label="$1"
+  local expected
+
+  expected=$(agent_expected_command "${label}" 2>/dev/null || true)
+  if [[ -z "${expected}" ]]; then
+    print_fail_line "${label}: could not infer executable from command"
+    return 1
+  fi
+
+  if command -v "${expected}" >/dev/null 2>&1; then
+    print_ok_line "${label}: ${expected} ($(command -v "${expected}"))"
+    return 0
+  fi
+
+  print_fail_line "${label}: executable '${expected}' not found on PATH"
+  return 1
+}
+
+doctor_council() {
+  local failures=0
+
+  print_heading "council doctor"
+  print_config_sources
+
+  doctor_check_bin tmux || failures=$((failures + 1))
+  doctor_check_bin tmux-bridge || failures=$((failures + 1))
+  doctor_check_bin perl || failures=$((failures + 1))
+
+  if command -v tmux-bridge >/dev/null 2>&1; then
+    if tmux-bridge help 2>/dev/null | grep -Eq '^[[:space:]]*send <target> <text>[[:space:]]'; then
+      print_ok_line "tmux-bridge send: supported"
+    else
+      print_fail_line "tmux-bridge send: unsupported; upgrade tmux-bridge"
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if [[ -n "${TMUX:-}" ]]; then
+    print_ok_line "tmux client: inside tmux"
+  else
+    print_warn_line "tmux client: not inside tmux; start/run/status require a tmux pane"
+  fi
+
+  doctor_check_agent_command "${CODEX_LABEL}" || failures=$((failures + 1))
+  doctor_check_agent_command "${CC_LABEL}" || failures=$((failures + 1))
+  doctor_check_agent_command "${AMP_LABEL}" || failures=$((failures + 1))
+
+  doctor_check_integer "MAESTRO_COUNCIL_TIMEOUT" "${DEFAULT_TIMEOUT}" || failures=$((failures + 1))
+  doctor_check_number "MAESTRO_COUNCIL_POLL_INTERVAL" "${POLL_INTERVAL}" || failures=$((failures + 1))
+  doctor_check_integer "MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS" "${MAX_REVIEW_ROUNDS}" || failures=$((failures + 1))
+  doctor_check_integer "MAESTRO_COUNCIL_AGENT_READY_TIMEOUT" "${AGENT_READY_TIMEOUT}" || failures=$((failures + 1))
+  doctor_check_integer "MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES" "${ORCHESTRATOR_PANE_LINES}" || failures=$((failures + 1))
+  doctor_check_integer "MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH" "${ORCHESTRATOR_PANE_WIDTH}" || failures=$((failures + 1))
+
+  case "${ORCHESTRATOR_PANE_TARGET}" in
+    current|CURRENT|council|COUNCIL)
+      print_ok_line "MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET: ${ORCHESTRATOR_PANE_TARGET}"
+      ;;
+    *)
+      print_fail_line "MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET: expected current or council, got '${ORCHESTRATOR_PANE_TARGET}'"
+      failures=$((failures + 1))
+      ;;
+  esac
+
+  case "${OUTPUT_COLOR_MODE}" in
+    auto|AUTO|always|ALWAYS|never|NEVER)
+      print_ok_line "output color mode: ${OUTPUT_COLOR_MODE}"
+      ;;
+    *)
+      print_fail_line "output color mode: expected auto, always, or never; got '${OUTPUT_COLOR_MODE}'"
+      failures=$((failures + 1))
+      ;;
+  esac
+
+  if (( failures > 0 )); then
+    print_fail_line "doctor found ${failures} blocking issue(s)"
+    return 1
+  fi
+
+  print_ok_line "doctor found no blocking issues"
+}
+
+list_runs_council() {
+  local limit="${1:-12}"
+  local run_dir run_id status phase target stage instance task found=0
+
+  set_council_paths "${PWD}"
+
+  print_heading "council runs"
+  print_path_field "runs directory" "${RUNS_DIR}"
+
+  if [[ ! -d "${RUNS_DIR}" ]]; then
+    print_note_line "no runs directory yet"
+    return 0
+  fi
+
+  printf '%-22s %-10s %-14s %-10s %-24s %-14s %s\n' "RUN" "STATUS" "PHASE" "TARGET" "STAGE" "INSTANCE" "TASK"
+  while IFS= read -r run_dir; do
+    found=1
+    run_id=$(basename "${run_dir}")
+    status=$(read_optional_file "${run_dir}/status.txt" "-")
+
+    if [[ -f "${run_dir}/task.txt" && -f "${run_dir}/workspace.txt" ]]; then
+      load_run_context_from_dir "${run_dir}"
+      phase=$(read_run_phase)
+      target=$(read_run_target)
+      stage=$(next_stage_for_run)
+      instance="${COUNCIL_INSTANCE}"
+      task="${RUN_TASK}"
+    else
+      phase=$(read_optional_file "${run_dir}/phase.txt" "-")
+      target=$(read_optional_file "${run_dir}/target.txt" "-")
+      stage=$(read_optional_file "${run_dir}/stage.txt" "-")
+      instance=$(read_optional_file "${run_dir}/instance.txt" "default")
+      task=$(read_optional_file "${run_dir}/task.txt" "")
+    fi
+
+    task=$(printf '%s' "${task}" | tr '\n' ' ' | cut -c 1-70)
+    printf '%-22s %-10s %-14s %-10s %-24s %-14s %s\n' \
+      "${run_id}" "${status}" "${phase}" "${target}" "${stage}" "${instance}" "${task}"
+  done < <(find "${RUNS_DIR}" -mindepth 1 -maxdepth 1 -type d | sort -r | head -n "${limit}")
+
+  if (( found == 0 )); then
+    print_note_line "no council runs found"
+  fi
+}
+
+show_council_run() {
+  local run_ref="$1"
+  local run_dir task
+
+  set_council_paths "${PWD}"
+  run_dir=$(resolve_run_dir "${run_ref}")
+  load_run_context_from_dir "${run_dir}"
+  task=$(read_optional_file "${RUN_DIR}/task.txt" "")
+
+  print_run_summary
+  printf '%btask:%b\n' "${STYLE_KEY}" "${STYLE_RESET}"
+  printf '  %s\n' "${task}"
+
+  if [[ -f "${RUN_DIR}/progress.log" ]]; then
+    printf '%brecent progress:%b\n' "${STYLE_KEY}" "${STYLE_RESET}"
+    tail -n 8 "${RUN_DIR}/progress.log" | sed 's/^/  /'
+  fi
+}
+
+default_project_config_path() {
+  local git_root
+
+  if command -v git >/dev/null 2>&1; then
+    git_root=$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -n "${git_root}" ]]; then
+      printf '%s\n' "${git_root}/.maestro-council.conf"
+      return
+    fi
+  fi
+
+  printf '%s\n' "${PWD}/.maestro-council.conf"
+}
+
+write_config_template() {
+  local path="$1"
+
+  cat > "${path}" <<'EOF'
+# maestro-council config.
+# This is a shell file; use normal VAR=value assignments.
+
+MAESTRO_COUNCIL_CODEX_CMD='codex'
+MAESTRO_COUNCIL_CC_CMD='claude --permission-mode bypassPermissions'
+MAESTRO_COUNCIL_AMP_CMD='amp'
+
+# Store run artifacts somewhere else, for example:
+# MAESTRO_COUNCIL_HOME="$HOME/.local/state/maestro-council"
+
+MAESTRO_COUNCIL_TIMEOUT=900
+MAESTRO_COUNCIL_MAX_REVIEW_ROUNDS=2
+MAESTRO_COUNCIL_AGENT_READY_TIMEOUT=60
+
+# current: split below the invoking pane
+# council: keep the orchestration rail inside the council window
+MAESTRO_COUNCIL_ORCHESTRATOR_PANE_TARGET='council'
+MAESTRO_COUNCIL_ORCHESTRATOR_PANE_LINES=14
+MAESTRO_COUNCIL_ORCHESTRATOR_PANE_WIDTH=20
+
+# auto, always, or never
+MAESTRO_COUNCIL_COLOR='always'
+EOF
+}
+
+init_config_council() {
+  local scope="project"
+  local force=0
+  local target=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --global)
+        scope="global"
+        ;;
+      --project)
+        scope="project"
+        ;;
+      --force)
+        force=1
+        ;;
+      -*)
+        die "usage: council init-config [--global|--project] [--force] [path]"
+        ;;
+      *)
+        [[ -z "${target}" ]] || die "usage: council init-config [--global|--project] [--force] [path]"
+        target="$1"
+        ;;
+    esac
+    shift || true
+  done
+
+  if [[ -z "${target}" ]]; then
+    if [[ "${scope}" == "global" ]]; then
+      [[ -n "${HOME:-}" ]] || die "HOME is not set; pass an explicit config path"
+      target="${HOME}/.config/maestro-council/council.conf"
+    else
+      target=$(default_project_config_path)
+    fi
+  fi
+
+  if [[ -e "${target}" && "${force}" != "1" ]]; then
+    die "config already exists: ${target} (use --force to overwrite)"
+  fi
+
+  mkdir -p "$(dirname "${target}")"
+  write_config_template "${target}"
+
+  print_heading "council config initialized"
+  print_path_field "config" "${target}"
+  print_field "inspect" "council config"
 }
 
 run_council() {
@@ -2039,13 +2518,18 @@ usage() {
 council
 
 Usage:
+  council config
+  council init-config [--global|--project] [--force] [path]
+  council doctor
   council start [--force] [--instance <name>]
   council reset [--instance <name>]
   council status [--instance <name>]
   council status --all
-  council plan [--instance <name>] <task>
+  council runs [--limit <n>]
+  council show <run-id-or-path>
+  council plan [--instance <name>] [--task-file <path>|-] <task>
   council exec <run-id-or-path>
-  council run [--instance <name>] <task>
+  council run [--instance <name>] [--task-file <path>|-] <task>
   council run [--instance <name>] -- <task starting with dashes>
   council resume <run-id-or-path>
   council continue <run-id-or-path>
@@ -2069,6 +2553,17 @@ main() {
   apply_council_instance "${MAESTRO_COUNCIL_INSTANCE:-default}"
 
   case "${cmd}" in
+    config)
+      [[ $# -eq 0 ]] || die "usage: council config"
+      config_council
+      ;;
+    init-config)
+      init_config_council "$@"
+      ;;
+    doctor)
+      [[ $# -eq 0 ]] || die "usage: council doctor"
+      doctor_council
+      ;;
     start)
       local force=""
       while [[ $# -gt 0 ]]; do
@@ -2122,13 +2617,41 @@ main() {
       done
       status_council "${list_all}"
       ;;
+    runs)
+      local limit="12"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --limit|-n)
+            shift || true
+            [[ $# -gt 0 ]] || die "missing value for --limit"
+            limit="$1"
+            ;;
+          *)
+            die "usage: council runs [--limit <n>]"
+            ;;
+        esac
+        shift || true
+      done
+      doctor_check_integer "--limit" "${limit}" >/dev/null || die "usage: council runs [--limit <n>]"
+      list_runs_council "${limit}"
+      ;;
+    show)
+      [[ $# -eq 1 ]] || die "usage: council show <run-id-or-path>"
+      show_council_run "$1"
+      ;;
     plan)
       local task_args=()
+      local task_file=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --instance|-i)
             shift || true
             parse_instance_option "$@"
+            ;;
+          --task-file|-f)
+            shift || true
+            [[ $# -gt 0 ]] || die "missing value for --task-file"
+            task_file="$1"
             ;;
           --)
             shift || true
@@ -2136,7 +2659,7 @@ main() {
             break
             ;;
           -*)
-            die "usage: council plan [--instance <name>] <task>"
+            die "usage: council plan [--instance <name>] [--task-file <path>|-] <task>"
             ;;
           *)
             task_args+=("$@")
@@ -2145,6 +2668,11 @@ main() {
         esac
         shift || true
       done
+      if [[ -n "${task_file}" ]]; then
+        (( ${#task_args[@]} == 0 )) || die "provide either --task-file or inline task text, not both"
+        task_args=("$(read_task_input "${task_file}")")
+      fi
+      [[ ${#task_args[@]} -gt 0 && -n "${task_args[*]:-}" ]] || die "usage: council plan [--instance <name>] [--task-file <path>|-] <task>"
       plan_council "${task_args[@]}"
       ;;
     exec)
@@ -2153,11 +2681,17 @@ main() {
       ;;
     run)
       local task_args=()
+      local task_file=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --instance|-i)
             shift || true
             parse_instance_option "$@"
+            ;;
+          --task-file|-f)
+            shift || true
+            [[ $# -gt 0 ]] || die "missing value for --task-file"
+            task_file="$1"
             ;;
           --)
             shift || true
@@ -2165,7 +2699,7 @@ main() {
             break
             ;;
           -*)
-            die "usage: council run [--instance <name>] <task>"
+            die "usage: council run [--instance <name>] [--task-file <path>|-] <task>"
             ;;
           *)
             task_args+=("$@")
@@ -2174,7 +2708,12 @@ main() {
         esac
         shift || true
       done
-      if maybe_run_in_orchestrator_pane "${original_args[@]}"; then
+      if [[ -n "${task_file}" ]]; then
+        (( ${#task_args[@]} == 0 )) || die "provide either --task-file or inline task text, not both"
+        task_args=("$(read_task_input "${task_file}")")
+      fi
+      [[ ${#task_args[@]} -gt 0 && -n "${task_args[*]:-}" ]] || die "usage: council run [--instance <name>] [--task-file <path>|-] <task>"
+      if [[ "${task_file}" != "-" ]] && maybe_run_in_orchestrator_pane "${original_args[@]}"; then
         return 0
       fi
       run_council "${task_args[@]}"
